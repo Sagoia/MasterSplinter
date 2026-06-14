@@ -1,0 +1,31 @@
+<UserControl
+    x:Class="MasterSplinter.Entrypoint.Controls.ToolButton"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Button x:Name="Root" Style="{StaticResource GhostButtonStyle}" Width="66" Height="58"
+            Click="OnRootClick" ToolTipService.ToolTip="{x:Bind Label, Mode=OneWay}">
+        <StackPanel x:Name="Content0" Orientation="Vertical" HorizontalAlignment="Center" Spacing="4">
+            <Grid Width="24" Height="24" HorizontalAlignment="Center">
+                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}" FontSize="18"
+                          Glyph="{x:Bind Glyph, Mode=OneWay}"
+                          Foreground="{ThemeResource TextPrimaryBrush}"
+                          Visibility="{x:Bind Vector, Mode=OneWay, Converter={StaticResource StrEqVis}, ConverterParameter=glyph}" />
+                <ContentControl Template="{StaticResource BranchIconTemplate}" Width="22" Height="22"
+                                Foreground="{ThemeResource TextPrimaryBrush}" IsTabStop="False"
+                                Visibility="{x:Bind Vector, Mode=OneWay, Converter={StaticResource StrEqVis}, ConverterParameter=branch}" />
+                <ContentControl Template="{StaticResource MergeIconTemplate}" Width="22" Height="22"
+                                Foreground="{ThemeResource TextPrimaryBrush}" IsTabStop="False"
+                                Visibility="{x:Bind Vector, Mode=OneWay, Converter={StaticResource StrEqVis}, ConverterParameter=merge}" />
+                <ContentControl Template="{StaticResource StashIconTemplate}" Width="22" Height="22"
+                                Foreground="{ThemeResource TextPrimaryBrush}" IsTabStop="False"
+                                Visibility="{x:Bind Vector, Mode=OneWay, Converter={StaticResource StrEqVis}, ConverterParameter=stash}" />
+            </Grid>
+            <TextBlock Text="{x:Bind Label, Mode=OneWay}" FontSize="11"
+                       HorizontalAlignment="Center" Foreground="{ThemeResource TextPrimaryBrush}" />
+        </StackPanel>
+    </Button>
+</UserControl>

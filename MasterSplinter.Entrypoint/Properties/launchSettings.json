@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "MasterSplinter.Entrypoint (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "MasterSplinter.Entrypoint (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

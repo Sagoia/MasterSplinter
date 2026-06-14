@@ -1,0 +1,2 @@
+#define MASTERSPLINTERLOGIC_API __declspec(dllexport)
+#define MASTERSPLINTERLOGIC_API __declspec(dllimport)
