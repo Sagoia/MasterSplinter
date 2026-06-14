@@ -1,3 +1,4 @@
+using System;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -28,6 +29,17 @@ namespace MasterSplinter.Entrypoint
             RootGrid.ActualThemeChanged += (_, _) => UpdateCaptionButtonColors();
 
             UpdateCaptionButtonColors();
+
+            // ---- Confirm the native C++ core loaded (P/Invoke) ------------------------------
+            try
+            {
+                CoreInfo.Text = $"· {Interop.NativeLogic.Version()}";
+                System.Diagnostics.Debug.WriteLine($"[interop] MsLogicAdd(40,2) = {Interop.NativeLogic.Add(40, 2)}");
+            }
+            catch (Exception ex)
+            {
+                CoreInfo.Text = $"· C++ core unavailable: {ex.GetType().Name}";
+            }
         }
 
         /// <summary>Reserve space for the system caption buttons so content never slides under them.</summary>
@@ -71,6 +83,16 @@ namespace MasterSplinter.Entrypoint
                 bar.ButtonPressedBackgroundColor = Color.FromArgb(0x28, 0x00, 0x00, 0x00);
                 bar.ButtonInactiveForegroundColor = Color.FromArgb(0xFF, 0x8A, 0x8A, 0x8A);
             }
+        }
+
+        // Keeps the scaled content filling the host: ScaledRoot is laid out at host/scale, then the
+        // RenderTransform shrinks it back to exactly fill ZoomHost (so 0.85 = everything ~15% smaller).
+        private void ZoomHost_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            double scale = UiScale.ScaleX;
+            if (scale <= 0) return;
+            ScaledRoot.Width = ZoomHost.ActualWidth / scale;
+            ScaledRoot.Height = ZoomHost.ActualHeight / scale;
         }
 
         private void ToggleTheme_Click(object sender, RoutedEventArgs e)

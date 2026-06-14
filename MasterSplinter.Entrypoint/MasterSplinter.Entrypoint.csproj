@@ -43,8 +43,34 @@
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Sizers" Version="8.2.251219" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\MasterSplinter.Logic\MasterSplinter.Logic.vcxproj" />
+    <!-- Native C++ DLL: build it first; it is NOT a managed assembly so don't reference it as one
+         (SkipGetTargetFrameworkProperties also silences the benign MSB3851 platform-version warning). -->
+    <ProjectReference Include="..\MasterSplinter.Logic\MasterSplinter.Logic.vcxproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+    </ProjectReference>
   </ItemGroup>
+
+  <!-- Copy MasterSplinterLogic.dll into our output + MSIX so P/Invoke resolves it at runtime.
+       Done in a target (after the ProjectReference builds it, before Content paths are assigned)
+       so the file exists even on a clean build. x86 maps to the C++ project's "Win32" folder. -->
+  <PropertyGroup>
+    <!-- MSB3851 fires because RAR inspects the native DLL's platform version; it's harmless for a
+         P/Invoke-only native reference, so demote it from a warning to a message. -->
+    <MSBuildWarningsAsMessages>$(MSBuildWarningsAsMessages);MSB3851</MSBuildWarningsAsMessages>
+    <NativeLogicPlatform>$(Platform)</NativeLogicPlatform>
+    <NativeLogicPlatform Condition="'$(Platform)' == 'x86'">Win32</NativeLogicPlatform>
+    <NativeLogicDll>$(MSBuildThisFileDirectory)..\MasterSplinter.Logic\$(NativeLogicPlatform)\$(Configuration)\MasterSplinterLogic.dll</NativeLogicDll>
+  </PropertyGroup>
+  <Target Name="IncludeNativeLogicDll" AfterTargets="ResolveProjectReferences" BeforeTargets="AssignTargetPaths">
+    <ItemGroup Condition="Exists('$(NativeLogicDll)')">
+      <Content Include="$(NativeLogicDll)">
+        <Link>MasterSplinterLogic.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
 
   <!--
     Defining the "HasPackageAndPublishMenuAddedByProject" property here allows the Solution

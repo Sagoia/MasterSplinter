@@ -10,13 +10,22 @@
 #define MASTERSPLINTERLOGIC_API __declspec(dllimport)
 #endif
 
-// This class is exported from the dll
-class MASTERSPLINTERLOGIC_API CMasterSplinterLogic {
-public:
-	CMasterSplinterLogic(void);
-	// TODO: add your methods here.
-};
+// ---------------------------------------------------------------------------------------------
+// Flat C ABI — this is the interop boundary consumed by the C# app via P/Invoke, and the same
+// boundary any other OS's FFI can call. Keep it `extern "C"` (no name mangling, C-compatible
+// types only) and keep the real, portable logic behind it (no <windows.h> in the core).
+// ---------------------------------------------------------------------------------------------
+extern "C" {
+	// ---- Lifecycle (do DLL/state setup HERE, not in DllMain) --------------------------------
+	// Call MsLogicInitialize() once after the library loads, before any other call; call
+	// MsLogicShutdown() once at exit. These are portable (identical on every OS) and run outside
+	// the loader lock, so real one-time work (opening libgit2, warming caches, etc.) is safe here.
+	MASTERSPLINTERLOGIC_API bool MsLogicInitialize(void);
+	MASTERSPLINTERLOGIC_API void MsLogicShutdown(void);
 
-extern MASTERSPLINTERLOGIC_API int nMasterSplinterLogic;
+	// Returns a static, null-terminated UTF-8 version string. The caller must NOT free it.
+	MASTERSPLINTERLOGIC_API const char* MsLogicVersion(void);
 
-MASTERSPLINTERLOGIC_API int fnMasterSplinterLogic(void);
+	// Trivial sample so the round-trip is verifiable from C#.
+	MASTERSPLINTERLOGIC_API int MsLogicAdd(int a, int b);
+}

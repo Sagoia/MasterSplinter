@@ -17,11 +17,9 @@
     <Grid x:Name="RootGrid" Background="{ThemeResource AppBackgroundBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <!-- custom title bar (menu lives here) -->
-            <RowDefinition Height="Auto" />
-            <!-- repository tab strip -->
+            <!-- custom title bar (menu lives here, kept at 100% so caption buttons align) -->
             <RowDefinition Height="*" />
-            <!-- workspace for the active repository -->
+            <!-- zoom host: tab strip + workspace, scaled down -->
         </Grid.RowDefinitions>
 
         <!-- ===================== CUSTOM TITLE BAR ===================== -->
@@ -48,6 +46,8 @@
                                 Foreground="{ThemeResource LinkBrush}" IsTabStop="False" VerticalAlignment="Center" />
                 <TextBlock Text="MasterSplinter" FontSize="13" FontWeight="SemiBold"
                            Foreground="{ThemeResource TextPrimaryBrush}" VerticalAlignment="Center" />
+                <TextBlock x:Name="CoreInfo" FontSize="11" VerticalAlignment="Center" Margin="2,1,0,0"
+                           Foreground="{ThemeResource TextMutedBrush}" />
             </StackPanel>
 
             <!-- top menu -->
@@ -105,10 +105,25 @@
             <Border x:Name="TitleBarDrag" Grid.Column="3" Background="Transparent" />
         </Grid>
 
+        <!-- ===================== ZOOM HOST (scales tab strip + workspace) ===================== -->
+        <!-- A RenderTransform scales the content; ScaledRoot is sized to host/scale in code-behind
+             so the scaled content still fills the available area. -->
+        <Grid x:Name="ZoomHost" Grid.Row="1" SizeChanged="ZoomHost_SizeChanged">
+            <Grid x:Name="ScaledRoot" HorizontalAlignment="Left" VerticalAlignment="Top">
+                <Grid.RenderTransform>
+                    <ScaleTransform x:Name="UiScale" ScaleX="0.85" ScaleY="0.85" />
+                </Grid.RenderTransform>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <!-- repository tab strip -->
+                    <RowDefinition Height="*" />
+                    <!-- workspace for the active repository -->
+                </Grid.RowDefinitions>
+
         <!-- ===================== REPOSITORY TAB STRIP ===================== -->
         <!-- TabView is used as a strip only; the workspace lives in its own row below so that
              it gets a bounded height and fills correctly (TabView's content host sizes to content). -->
-        <TabView Grid.Row="1" x:Name="RepoTabs" SelectedIndex="0"
+        <TabView Grid.Row="0" x:Name="RepoTabs" SelectedIndex="0"
                  TabWidthMode="SizeToContent"
                  AddTabButtonClick="RepoTabs_AddTabButtonClick"
                  TabCloseRequested="RepoTabs_TabCloseRequested">
@@ -131,7 +146,9 @@
             </TabView.TabItems>
         </TabView>
 
-        <!-- ===================== ACTIVE REPOSITORY WORKSPACE ===================== -->
-        <ctl:RepositoryWorkspace Grid.Row="2" />
+                <!-- ===================== ACTIVE REPOSITORY WORKSPACE ===================== -->
+                <ctl:RepositoryWorkspace Grid.Row="1" />
+            </Grid>
+        </Grid>
     </Grid>
 </Window>

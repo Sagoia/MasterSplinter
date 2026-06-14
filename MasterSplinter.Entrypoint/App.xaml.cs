@@ -43,7 +43,12 @@ namespace MasterSplinter.Entrypoint
         /// <param name="args">Details about the launch request and process.</param>
         protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
         {
+            // Bring up the cross-platform C++ core before any logic runs; tear it down on exit.
+            // (Real lifecycle lives here, not in the DLL's DllMain — see MasterSplinter.Logic.)
+            Interop.NativeLogic.Initialize();
+
             _window = new MainWindow();
+            _window.Closed += (_, _) => Interop.NativeLogic.Shutdown();
             _window.Activate();
         }
     }
