@@ -1,9 +1,11 @@
 using System;
+using System.Threading.Tasks;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Windows.Storage.Pickers;
 using Windows.UI;
 using MasterSplinter.Entrypoint.Infrastructure;
 
@@ -11,11 +13,18 @@ namespace MasterSplinter.Entrypoint
 {
     public sealed partial class MainWindow : Window
     {
-        private int _newTabCounter;
+        // Set while we add/select a tab programmatically, so RepoTabs_SelectionChanged doesn't
+        // re-trigger a load for the tab we just opened.
+        private bool _suppressTabSelection;
 
         public MainWindow()
         {
             InitializeComponent();
+
+            // The workspace lives in the visual tree; route its home-screen actions to the window
+            // (which owns the folder picker + the repository tab strip).
+            Workspace.OpenRepositoryRequested += async (_, _) => await PickAndOpenAsync();
+            Workspace.OpenRecentRequested += async (_, path) => await OpenRepoAsync(path);
 
             // ---- Modern WinUI 3 custom title bar -------------------------------------------
             ExtendsContentIntoTitleBar = true;   // hide the system title bar (must be set in code)
@@ -104,26 +113,89 @@ namespace MasterSplinter.Entrypoint
 
         private void Exit_Click(object sender, RoutedEventArgs e) => Close();
 
-        private void NewTab_Click(object sender, RoutedEventArgs e) => AddRepositoryTab();
+        // ---- Open repository (CORE-001/002/003) -----------------------------------------------
 
-        private void RepoTabs_AddTabButtonClick(TabView sender, object args) => AddRepositoryTab();
+        private async void OpenRepository_Click(object sender, RoutedEventArgs e) => await PickAndOpenAsync();
+
+        private async void RepoTabs_AddTabButtonClick(TabView sender, object args) => await PickAndOpenAsync();
+
+        /// <summary>Show the folder picker, then open whatever the user selects.</summary>
+        private async Task PickAndOpenAsync()
+        {
+            var picker = new FolderPicker();
+            picker.FileTypeFilter.Add("*"); // FolderPicker requires at least one filter
+            // Packaged WinUI app: associate the picker with our window handle.
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder != null)
+                await OpenRepoAsync(folder.Path);
+        }
+
+        /// <summary>Load a repository into the shared workspace and reflect it as the active tab.</summary>
+        private async Task OpenRepoAsync(string path)
+        {
+            await Workspace.Vm.LoadRepositoryAsync(path);
+            if (!Workspace.Vm.HasRepository || Workspace.Vm.Repository is null)
+                return; // invalid folder: the workspace already surfaced the error
+
+            string root = Workspace.Vm.Repository.RootPath;
+            string name = Workspace.Vm.Repository.Name;
+
+            TabViewItem? existing = null;
+            foreach (var item in RepoTabs.TabItems)
+            {
+                if (item is TabViewItem tvi && tvi.Tag is string p &&
+                    string.Equals(p, root, StringComparison.OrdinalIgnoreCase))
+                {
+                    existing = tvi;
+                    break;
+                }
+            }
+
+            _suppressTabSelection = true;
+            try
+            {
+                if (existing == null)
+                {
+                    existing = new TabViewItem
+                    {
+                        Header = name,
+                        Tag = root,
+                        IconSource = new FontIconSource { Glyph = Glyphs.Of(Glyphs.Folder) },
+                    };
+                    RepoTabs.TabItems.Add(existing);
+                }
+                else
+                {
+                    existing.Header = name;
+                }
+                RepoTabs.SelectedItem = existing;
+            }
+            finally
+            {
+                _suppressTabSelection = false;
+            }
+        }
+
+        private async void RepoTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressTabSelection)
+                return;
+            if (RepoTabs.SelectedItem is TabViewItem tvi && tvi.Tag is string path &&
+                !string.Equals(path, Workspace.Vm.Repository?.RootPath, StringComparison.OrdinalIgnoreCase))
+            {
+                await Workspace.Vm.LoadRepositoryAsync(path);
+            }
+        }
 
         private void RepoTabs_TabCloseRequested(TabView sender, TabViewTabCloseRequestedEventArgs args)
         {
             sender.TabItems.Remove(args.Tab);
-        }
-
-        private void AddRepositoryTab()
-        {
-            // The TabView is a strip only; tabs carry no content (the shared workspace lives below it).
-            var tab = new TabViewItem
-            {
-                Header = $"new-repo-{++_newTabCounter}",
-                IconSource = new FontIconSource { Glyph = Glyphs.Of(Glyphs.Folder) },
-            };
-
-            RepoTabs.TabItems.Add(tab);
-            RepoTabs.SelectedItem = tab;
+            if (sender.TabItems.Count == 0)
+                Workspace.Vm.CloseRepository(); // back to the home screen
+            // else: removing the selected tab auto-selects a neighbor -> SelectionChanged loads it.
         }
     }
 }

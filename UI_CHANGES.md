@@ -4,7 +4,9 @@ A SourceTree‑style Git client UI built on **WinUI 3 / Windows App SDK** (`net8
 This document lists every UI change made on top of the original empty `MasterSplinter.Entrypoint`
 template (which started as a blank `MainWindow` with a `Mica` backdrop).
 
-> The UI is a visual layer with representative **sample data** — there is no real Git backend wired up yet.
+> **Update (Phase 1):** the UI is now backed by a **real, read-only Git backend** — the native C++ core
+> (`MasterSplinter.Logic`) shells out to `git.exe` behind a flat C ABI, and the C# app parses it into the
+> view models. The original sample data has been removed. See the **Phase 1** section at the bottom.
 
 ---
 
@@ -114,12 +116,41 @@ Headers/`origin` show a chevron and collapse their children; branch leaves use t
 
 ## 6. Build & run
 
-Packaged WinUI app on an **ARM64** machine:
+Packaged WinUI app on an **ARM64** machine. Use **full VS MSBuild** (not `dotnet build`) — the C# app
+ProjectReferences the native C++ `vcxproj`, whose targets the .NET SDK's msbuild lacks:
 
 ```powershell
-dotnet build MasterSplinter.Entrypoint/MasterSplinter.Entrypoint.csproj -c Debug -p:Platform=ARM64
-Add-AppxPackage -Register "MasterSplinter.Entrypoint\bin\ARM64\Debug\net8.0-windows10.0.19041.0\win-arm64\AppxManifest.xml" -ForceUpdateFromAnyVersion
+& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" `
+  MasterSplinter.Entrypoint\MasterSplinter.Entrypoint.csproj -restore -t:Build -p:Configuration=Debug -p:Platform=ARM64
+Add-AppxPackage -Register "MasterSplinter.Entrypoint\bin\ARM64\Debug\net8.0-windows10.0.19041.0\win-arm64\AppX\AppxManifest.xml" -ForceUpdateFromAnyVersion
 Start-Process "shell:AppsFolder\e0495604-e15e-4723-9b06-1d9e9d7c5cbf_3z1m0dck14mey!App"
 ```
 
-Or simply open the solution in Visual Studio and press **F5** (platform **ARM64**).
+Or simply open the solution in Visual Studio and press **F5** (platform **ARM64**). If a code change
+doesn't seem to take effect from the command line, the MSIX loose layout went stale — delete `bin`/`obj`
+and rebuild clean.
+
+---
+
+## 7. Phase 1 — read-only Git backend
+
+The UI is now backed by **real git data**. The native C++ core shells out to `git.exe` (mirroring how
+TortoiseGit reads data), exposed via a flat C ABI and consumed from C# by P/Invoke.
+
+| Layer | File(s) | Role |
+| --- | --- | --- |
+| Native git backend | `MasterSplinter.Logic/GitBackend.cpp`, `MasterSplinter.Logic.h` | `RunGit` (CreateProcessW) + `MsGit*` C-ABI funcs that build git commands and return delimited UTF-8. |
+| P/Invoke | `Interop/NativeLogic.cs` | Bindings for `MsGit*`; copy-then-free of returned `char*`. |
+| Git service | `Git/GitRepository.cs` | Parses delimited streams into models (`Open`/`Log`/`ListRefs`/`ChangedFiles`/`Diff`/`FileAt`). |
+| Recents | `Git/RecentRepositoriesStore.cs` | Persists recent repos as JSON in local app data. |
+| View model | `ViewModels/MainViewModel.cs` | Async loading, selection-driven file/diff, search filter, order, recents. |
+
+**Features (acceptance criteria met):** open a folder with validation + clear error for non-repos
+(CORE-001); recent repositories on a home screen (CORE-002); repo name + branch header (CORE-003);
+real commit history with graph + ref badges (LOG-001); commit selection → detail (LOG-002); full
+hash/parents/author/committer/body (LOG-003); changed files with status icons + real unified diff
+(LOG-004); live message/author/SHA search (LOG-005); copy short/full SHA (LOG-006); open a file's
+content at a commit (LOG-007). The commit graph is intentionally simple (dot + single lane) for now.
+
+**FFI note:** returned `char*` buffers must not contain embedded NUL bytes — `Marshal.PtrToStringUTF8`
+truncates at the first NUL. The backend uses newline/tab/`0x1F`/`0x1E` separators, never `git -z`.

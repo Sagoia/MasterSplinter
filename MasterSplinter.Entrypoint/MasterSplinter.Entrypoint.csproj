@@ -72,6 +72,17 @@
     </ItemGroup>
   </Target>
 
+  <!-- Belt-and-suspenders: on incremental command-line builds the MSIX loose layout's copy step
+       can skip an updated file, leaving the registered AppX layout running a STALE native DLL
+       (P/Invoke then calls old code). Force-copy the freshly built DLL into the layout after every
+       build so 'register the loose AppxManifest' always picks up the current core. -->
+  <Target Name="RefreshNativeLogicInLayout" AfterTargets="Build"
+          Condition="Exists('$(NativeLogicDll)') and Exists('$(OutDir)AppX')">
+    <Copy SourceFiles="$(NativeLogicDll)"
+          DestinationFiles="$(OutDir)AppX\MasterSplinterLogic.dll"
+          SkipUnchangedFiles="false" OverwriteReadOnlyFiles="true" />
+  </Target>
+
   <!--
     Defining the "HasPackageAndPublishMenuAddedByProject" property here allows the Solution
     Explorer "Package and Publish" context menu entry to be enabled for this project even if
