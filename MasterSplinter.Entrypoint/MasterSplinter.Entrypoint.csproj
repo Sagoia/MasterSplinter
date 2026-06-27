@@ -5,8 +5,8 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>MasterSplinter.Entrypoint</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Platforms>x86;x64;ARM64</Platforms>
-    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <PublishProfile>win-$(Platform).pubxml</PublishProfile>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
@@ -56,13 +56,13 @@
 
   <!-- Copy MasterSplinterLogic.dll into our output + MSIX so P/Invoke resolves it at runtime.
        Done in a target (after the ProjectReference builds it, before Content paths are assigned)
-       so the file exists even on a clean build. x86 maps to the C++ project's "Win32" folder. -->
+       so the file exists even on a clean build. The platform name matches the C++ project's
+       output folder ($(Platform) is x64 or ARM64). -->
   <PropertyGroup>
     <!-- MSB3851 fires because RAR inspects the native DLL's platform version; it's harmless for a
          P/Invoke-only native reference, so demote it from a warning to a message. -->
     <MSBuildWarningsAsMessages>$(MSBuildWarningsAsMessages);MSB3851</MSBuildWarningsAsMessages>
     <NativeLogicPlatform>$(Platform)</NativeLogicPlatform>
-    <NativeLogicPlatform Condition="'$(Platform)' == 'x86'">Win32</NativeLogicPlatform>
     <NativeLogicDll>$(MSBuildThisFileDirectory)..\MasterSplinter.Logic\$(NativeLogicPlatform)\$(Configuration)\MasterSplinterLogic.dll</NativeLogicDll>
   </PropertyGroup>
   <Target Name="IncludeNativeLogicDll" AfterTargets="ResolveProjectReferences" BeforeTargets="AssignTargetPaths">
