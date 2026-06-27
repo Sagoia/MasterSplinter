@@ -41,6 +41,8 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Sizers" Version="8.2.251219" />
+    <!-- DIFF-003: syntax highlighting (ColorCode tokenizer + WinUI RichTextBlock formatter). -->
+    <PackageReference Include="ColorCode.WinUI" Version="2.0.15" />
   </ItemGroup>
   <ItemGroup>
     <!-- Native C++ DLL: build it first; it is NOT a managed assembly so don't reference it as one

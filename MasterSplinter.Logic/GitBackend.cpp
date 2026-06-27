@@ -266,15 +266,30 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, cons
     return DupString(out);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha)
 {
-    if (!root || !sha || !*sha || !path || !*path)
+    if (!root || !sha || !*sha)
         return DupString(std::string());
     int code;
     std::string out = RunGitC(root,
-        { "diff-tree", "-p", "-M", "--first-parent", "--root", "--no-commit-id", "--no-color",
-          sha, "--", path },
+        { "diff-tree", "--shortstat", "-M", "--first-parent", "--root", "--no-commit-id", sha },
         code);
+    return DupString(out);
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path, int wsMode)
+{
+    if (!root || !sha || !*sha || !path || !*path)
+        return DupString(std::string());
+    std::vector<std::string> args =
+        { "diff-tree", "-p", "-M", "--first-parent", "--root", "--no-commit-id", "--no-color" };
+    if (wsMode == 1) args.push_back("--ignore-space-change");
+    else if (wsMode == 2) args.push_back("--ignore-all-space");
+    args.push_back(sha);
+    args.push_back("--");
+    args.push_back(path);
+    int code;
+    std::string out = RunGitC(root, args, code);
     return DupString(out);
 }
 
@@ -287,6 +302,64 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileAtCommit(const char* root, con
     if (code != 0)
         return DupString(std::string());
     return DupString(out);
+}
+
+// ---- Compare two commits / refs (a..b) ---------------------------------------------------------
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b)
+{
+    if (!root || !a || !*a || !b || !*b)
+        return DupString(std::string());
+    int code;
+    std::string out = RunGitC(root,
+        { "-c", "core.quotePath=false", "diff", "--name-status", "-M", a, b },
+        code);
+    return DupString(out);
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b)
+{
+    if (!root || !a || !*a || !b || !*b)
+        return DupString(std::string());
+    int code;
+    std::string out = RunGitC(root, { "diff", "--shortstat", "-M", a, b }, code);
+    return DupString(out);
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
+                                                            const char* path, int wsMode)
+{
+    if (!root || !a || !*a || !b || !*b || !path || !*path)
+        return DupString(std::string());
+    std::vector<std::string> args = { "diff", "-M", "--no-color" };
+    if (wsMode == 1) args.push_back("--ignore-space-change");
+    else if (wsMode == 2) args.push_back("--ignore-all-space");
+    args.push_back(a);
+    args.push_back(b);
+    args.push_back("--");
+    args.push_back(path);
+    int code;
+    std::string out = RunGitC(root, args, code);
+    return DupString(out);
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileBytesAtCommit(const char* root, const char* sha,
+                                                                const char* path, int* outLen)
+{
+    if (outLen)
+        *outLen = 0;
+    if (!root || !sha || !*sha || !path || !*path)
+        return nullptr;
+    int code;
+    std::string out = RunGitC(root, { "show", std::string(sha) + ":" + path }, code);
+    if (code != 0)
+        return nullptr;
+    // DupString copies out.size() bytes via memcpy (binary-safe) plus a trailing NUL; the caller
+    // uses *outLen, not strlen, so embedded NULs in image data survive the FFI boundary.
+    char* p = DupString(out);
+    if (p && outLen)
+        *outLen = static_cast<int>(out.size());
+    return p;
 }
 
 extern "C" MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr)

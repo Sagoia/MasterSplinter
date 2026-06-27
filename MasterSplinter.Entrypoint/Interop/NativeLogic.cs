@@ -54,15 +54,43 @@ namespace MasterSplinter.Entrypoint.Interop
         private static extern IntPtr MsGitCommitFiles([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string sha);
 
+        [DllImport(Dll, EntryPoint = "MsGitCommitShortStat", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitCommitShortStat([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string sha);
+
         [DllImport(Dll, EntryPoint = "MsGitFileDiff", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
-                                                   [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+                                                   [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                                                   int wsMode);
 
         [DllImport(Dll, EntryPoint = "MsGitFileAtCommit", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileAtCommit([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                        [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
                                                        [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+        [DllImport(Dll, EntryPoint = "MsGitRangeFiles", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRangeFiles([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
+                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string b);
+
+        [DllImport(Dll, EntryPoint = "MsGitRangeShortStat", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRangeShortStat([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
+                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string b);
+
+        [DllImport(Dll, EntryPoint = "MsGitRangeFileDiff", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRangeFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                        [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
+                                                        [MarshalAs(UnmanagedType.LPUTF8Str)] string b,
+                                                        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                                                        int wsMode);
+
+        [DllImport(Dll, EntryPoint = "MsGitFileBytesAtCommit", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitFileBytesAtCommit([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                            [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
+                                                            [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                                                            out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFree", CallingConvention = CallingConvention.Cdecl)]
         private static extern void MsGitFree(IntPtr ptr);
@@ -80,7 +108,28 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitLog(string root, int order, int maxCount) => TakeString(MsGitLog(root, order, maxCount));
         public static string GitRefs(string root) => TakeString(MsGitRefs(root));
         public static string GitCommitFiles(string root, string sha) => TakeString(MsGitCommitFiles(root, sha));
-        public static string GitFileDiff(string root, string sha, string path) => TakeString(MsGitFileDiff(root, sha, path));
+        public static string GitCommitShortStat(string root, string sha) => TakeString(MsGitCommitShortStat(root, sha));
+        public static string GitFileDiff(string root, string sha, string path, int wsMode) => TakeString(MsGitFileDiff(root, sha, path, wsMode));
         public static string GitFileAtCommit(string root, string sha, string path) => TakeString(MsGitFileAtCommit(root, sha, path));
+        public static string GitRangeFiles(string root, string a, string b) => TakeString(MsGitRangeFiles(root, a, b));
+        public static string GitRangeShortStat(string root, string a, string b) => TakeString(MsGitRangeShortStat(root, a, b));
+        public static string GitRangeFileDiff(string root, string a, string b, string path, int wsMode) => TakeString(MsGitRangeFileDiff(root, a, b, path, wsMode));
+
+        /// <summary>Raw bytes of a file at a commit/ref (binary-safe; uses an explicit length, not strlen).</summary>
+        public static byte[] GitFileBytesAtCommit(string root, string sha, string path)
+        {
+            IntPtr ptr = MsGitFileBytesAtCommit(root, sha, path, out int len);
+            if (ptr == IntPtr.Zero)
+                return Array.Empty<byte>();
+            try
+            {
+                if (len <= 0)
+                    return Array.Empty<byte>();
+                var buffer = new byte[len];
+                Marshal.Copy(ptr, buffer, 0, len);
+                return buffer;
+            }
+            finally { MsGitFree(ptr); }
+        }
     }
 }

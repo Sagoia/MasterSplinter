@@ -62,6 +62,88 @@ namespace MasterSplinter.Entrypoint.Controls
             }
         }
 
+        // ---- Compare commits / refs (DIFF-006 / DIFF-007) -------------------------------------
+
+        private void MarkForComparison_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is CommitRow c)
+                Vm.MarkForComparison(c);
+        }
+
+        private async void CompareWithMarked_Click(object sender, RoutedEventArgs e)
+        {
+            if (!Vm.HasMarkedCommit)
+            {
+                await ShowMessageAsync("Compare commits", "Mark a commit first (right-click ▸ Mark for Comparison), then compare another with it.");
+                return;
+            }
+            if (sender is FrameworkElement fe && fe.DataContext is CommitRow c)
+                await Vm.CompareWithMarkedAsync(c);
+        }
+
+        private void ExitCompare_Click(object sender, RoutedEventArgs e) => Vm.ExitCompare();
+
+        // Opening Button.Flyout via the built-in trigger proved unreliable for this styled icon
+        // button, so the flyout is attached and shown explicitly here (DIFF-003/004 settings).
+        private void DiffSettings_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe)
+                Microsoft.UI.Xaml.Controls.Primitives.FlyoutBase.ShowAttachedFlyout(fe);
+        }
+
+        private async void CompareRefs_Click(object sender, RoutedEventArgs e)
+        {
+            var names = Vm.CompareRefNames;
+            if (names.Count == 0)
+            {
+                await ShowMessageAsync("Compare refs", "Open a repository first.");
+                return;
+            }
+
+            var sourceBox = new ComboBox
+            {
+                Header = "Source (A)", ItemsSource = names, SelectedIndex = 0,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            var targetBox = new ComboBox
+            {
+                Header = "Target (B)", ItemsSource = names, SelectedIndex = names.Count > 1 ? 1 : 0,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            var panel = new StackPanel { Spacing = 12, MinWidth = 320 };
+            panel.Children.Add(sourceBox);
+            panel.Children.Add(targetBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Compare refs",
+                Content = panel,
+                PrimaryButtonText = "Compare",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary
+                && sourceBox.SelectedItem is string a && targetBox.SelectedItem is string b)
+            {
+                await Vm.CompareRefsAsync(a, b);
+            }
+        }
+
+        private async Task ShowMessageAsync(string title, string message)
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+
         // ---- Home screen (CORE-002) -----------------------------------------------------------
 
         private void OpenRepo_Click(object sender, RoutedEventArgs e)

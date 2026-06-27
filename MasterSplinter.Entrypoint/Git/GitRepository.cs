@@ -185,11 +185,17 @@ namespace MasterSplinter.Entrypoint.Git
             return new Refs(branches, tags, remotes);
         }
 
-        // ---- Changed files for one commit ------------------------------------------------------
+        // ---- Changed files (single commit or a..b range) ---------------------------------------
 
         public IReadOnlyList<ChangedFile> ChangedFiles(string sha)
+            => ParseNameStatus(NativeLogic.GitCommitFiles(RootPath, sha));
+
+        /// <summary>Files changed between two commits/refs (DIFF-006 / DIFF-007).</summary>
+        public IReadOnlyList<ChangedFile> ChangedFilesRange(string a, string b)
+            => ParseNameStatus(NativeLogic.GitRangeFiles(RootPath, a, b));
+
+        private static IReadOnlyList<ChangedFile> ParseNameStatus(string raw)
         {
-            string raw = NativeLogic.GitCommitFiles(RootPath, sha);
             var files = new List<ChangedFile>();
             // Line-based "status<TAB>path" (rename/copy is "R100<TAB>old<TAB>new").
             foreach (string line in raw.Split('\n'))
@@ -222,14 +228,49 @@ namespace MasterSplinter.Entrypoint.Git
             _ => FileChangeStatus.Modified, // M, T, U, ...
         };
 
-        // ---- Diff for one file -----------------------------------------------------------------
+        // ---- Diff summary stats (DIFF-001) -----------------------------------------------------
+
+        public DiffStat CommitStat(string sha) => ParseShortStat(NativeLogic.GitCommitShortStat(RootPath, sha));
+        public DiffStat RangeStat(string a, string b) => ParseShortStat(NativeLogic.GitRangeShortStat(RootPath, a, b));
+
+        // " 3 files changed, 12 insertions(+), 4 deletions(-)" — each clause is optional.
+        private static readonly Regex FilesRe = new(@"(\d+)\s+files?\s+changed", RegexOptions.Compiled);
+        private static readonly Regex InsertRe = new(@"(\d+)\s+insertions?\(\+\)", RegexOptions.Compiled);
+        private static readonly Regex DeleteRe = new(@"(\d+)\s+deletions?\(-\)", RegexOptions.Compiled);
+
+        private static DiffStat ParseShortStat(string raw)
+            => new(MatchInt(FilesRe, raw), MatchInt(InsertRe, raw), MatchInt(DeleteRe, raw));
+
+        private static int MatchInt(Regex re, string s)
+        {
+            Match m = re.Match(s);
+            return m.Success ? int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) : 0;
+        }
+
+        // ---- Diff for one file (single commit or a..b range) -----------------------------------
 
         private static readonly Regex HunkRe =
             new(@"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", RegexOptions.Compiled);
 
-        public IReadOnlyList<DiffLine> Diff(string sha, string path)
+        public (List<DiffLine> Lines, bool IsBinary) FileDiff(string sha, string path, WhitespaceMode ws)
+            => ParseUnifiedDiff(NativeLogic.GitFileDiff(RootPath, sha, path, WsFlag(ws)));
+
+        public (List<DiffLine> Lines, bool IsBinary) RangeDiff(string a, string b, string path, WhitespaceMode ws)
+            => ParseUnifiedDiff(NativeLogic.GitRangeFileDiff(RootPath, a, b, path, WsFlag(ws)));
+
+        private static int WsFlag(WhitespaceMode m) => m switch
         {
-            string raw = NativeLogic.GitFileDiff(RootPath, sha, path);
+            WhitespaceMode.IgnoreChange => 1,
+            WhitespaceMode.IgnoreAll => 2,
+            _ => 0,
+        };
+
+        private static (List<DiffLine> Lines, bool IsBinary) ParseUnifiedDiff(string raw)
+        {
+            // A binary file's patch has no hunks, just a "Binary files ... differ" / binary-patch marker.
+            bool isBinary = raw.Contains("Binary files ", StringComparison.Ordinal)
+                         || raw.Contains("GIT binary patch", StringComparison.Ordinal);
+
             var lines = new List<DiffLine>();
             int oldNo = 0, newNo = 0;
             bool inHunk = false;
@@ -282,12 +323,15 @@ namespace MasterSplinter.Entrypoint.Git
                     newNo++;
                 }
             }
-            return lines;
+            return (lines, isBinary);
         }
 
         // ---- File content at a commit ----------------------------------------------------------
 
         public string FileAt(string sha, string path) => NativeLogic.GitFileAtCommit(RootPath, sha, path);
+
+        /// <summary>Raw bytes of a file at a commit/ref (binary-safe), for image previews (DIFF-005).</summary>
+        public byte[] FileBytesAt(string sha, string path) => NativeLogic.GitFileBytesAtCommit(RootPath, sha, path);
 
         // ---- Helpers ---------------------------------------------------------------------------
 

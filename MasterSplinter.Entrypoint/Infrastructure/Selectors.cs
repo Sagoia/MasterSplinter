@@ -64,4 +64,41 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         protected override DataTemplate SelectTemplateCore(object item, DependencyObject container)
             => SelectTemplateCore(item);
     }
+
+    /// <summary>Picks a side-by-side row template: a full-width hunk header vs. a two-cell split row (DIFF-002).</summary>
+    public sealed class DiffRowTemplateSelector : DataTemplateSelector
+    {
+        public DataTemplate? Hunk { get; set; }
+        public DataTemplate? Split { get; set; }
+
+        protected override DataTemplate SelectTemplateCore(object item)
+            => item is DiffRow r && r.IsHunk ? Hunk! : Split!;
+
+        protected override DataTemplate SelectTemplateCore(object item, DependencyObject container)
+            => SelectTemplateCore(item);
+    }
+
+    /// <summary>Picks a per-cell template for one side of a side-by-side row (DIFF-002). Shared by both columns.</summary>
+    public sealed class DiffCellTemplateSelector : DataTemplateSelector
+    {
+        public DataTemplate? Empty { get; set; }
+        public DataTemplate? Context { get; set; }
+        public DataTemplate? Added { get; set; }
+        public DataTemplate? Removed { get; set; }
+
+        protected override DataTemplate SelectTemplateCore(object item)
+            => item is DiffCell c
+                ? (!c.Present
+                    ? Empty!
+                    : c.Kind switch
+                    {
+                        DiffLineKind.Added => Added!,
+                        DiffLineKind.Removed => Removed!,
+                        _ => Context!,
+                    })
+                : Empty!;
+
+        protected override DataTemplate SelectTemplateCore(object item, DependencyObject container)
+            => SelectTemplateCore(item);
+    }
 }

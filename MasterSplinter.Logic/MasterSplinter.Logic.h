@@ -51,14 +51,37 @@ extern "C" {
 	// Newline-free list of full ref names (refs/heads, refs/tags, refs/remotes), 0x1E-separated.
 	MASTERSPLINTERLOGIC_API char* MsGitRefs(const char* root);
 
-	// NUL-separated git name-status for one commit: <status>\0<path>[\0<newPath>]\0...
+	// Tab-separated git name-status for one commit: "<status>\t<path>[\t<newPath>]" per line.
 	MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha);
 
+	// One-line "--shortstat" summary for a commit ("N files changed, X insertions(+), Y deletions(-)").
+	MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha);
+
 	// Unified diff text for one file in one commit (no commit header).
-	MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path);
+	// wsMode: 0 = honor whitespace, 1 = --ignore-space-change, 2 = --ignore-all-space.
+	MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path, int wsMode);
 
 	// Full file content as of that commit (git show <sha>:<path>); empty if absent.
 	MASTERSPLINTERLOGIC_API char* MsGitFileAtCommit(const char* root, const char* sha, const char* path);
+
+	// ---- Compare two commits / refs (a..b) — also used for branch/tag/HEAD comparison ----------
+	// a and b may be full SHAs OR ref names (branch/tag/HEAD); git diff accepts either.
+
+	// Tab-separated name-status for the diff between a and b ("<status>\t<path>[\t<newPath>]").
+	MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b);
+
+	// One-line "--shortstat" summary for the diff between a and b.
+	MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b);
+
+	// Unified diff text for one file between a and b. wsMode as in MsGitFileDiff.
+	MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
+	                                                 const char* path, int wsMode);
+
+	// Raw bytes of a file as of a commit/ref (git show <sha>:<path>), for binary/image previews.
+	// Unlike the char*-as-string returns, the payload MAY contain NUL bytes; *outLen holds the
+	// length and the caller must copy exactly that many bytes (not strlen). Returns nullptr on error.
+	MASTERSPLINTERLOGIC_API char* MsGitFileBytesAtCommit(const char* root, const char* sha,
+	                                                     const char* path, int* outLen);
 
 	// Frees any char* returned by the MsGit* functions above.
 	MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr);
