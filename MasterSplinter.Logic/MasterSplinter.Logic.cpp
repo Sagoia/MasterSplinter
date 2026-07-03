@@ -1,12 +1,19 @@
-// MasterSplinter.Logic.cpp : Defines the exported functions for the DLL.
+// MasterSplinter.Logic.cpp : the DLL lifecycle / version part of the flat C ABI.
 //
+// This is portable (no <windows.h>, PrecompiledHeader=NotUsing): the same source builds the
+// .dll on Windows and a .dylib on macOS. The Windows-only pieces are isolated in
+// dllmain.cpp and Platform/Windows/*. The read-only git C ABI lives in GitApi.cpp; the actual
+// git command building is in Git/GitBackend.cpp, and process launch behind Platform/IProcessRunner.
 
-#include "pch.h"
 #include "MasterSplinter.Logic.h"
 
-// NOTE: This file is the Windows DLL export layer only. The real cross-platform logic should
-// live in plain .cpp/.h files that do NOT include <windows.h>, so the same sources compile into
-// a .so/.dylib on Linux/macOS behind this same flat C ABI.
+// Backend lifecycle helpers implemented in GitApi.cpp (wires up the platform Abstract Factory
+// -> IProcessRunner -> GitBackend). Declared here to avoid pulling GitBackend into this TU.
+namespace msapi
+{
+    void InitBackend();
+    void ShutdownBackend();
+}
 
 namespace
 {
@@ -18,7 +25,10 @@ extern "C" MASTERSPLINTERLOGIC_API bool MsLogicInitialize(void)
 {
     if (g_initialized)
         return true;
-    // TODO: real one-time setup goes here (e.g. open a libgit2 session, build caches).
+    // Real one-time setup: build the process-wide git backend for this platform now, so the
+    // first git call does not pay for it (it is lazy-safe either way). Runs outside the loader
+    // lock, so this is the right place for it — never in DllMain.
+    msapi::InitBackend();
     g_initialized = true;
     return true;
 }
@@ -27,7 +37,8 @@ extern "C" MASTERSPLINTERLOGIC_API void MsLogicShutdown(void)
 {
     if (!g_initialized)
         return;
-    // TODO: release everything acquired in MsLogicInitialize().
+    // Release everything acquired in MsLogicInitialize().
+    msapi::ShutdownBackend();
     g_initialized = false;
 }
 

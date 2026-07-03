@@ -89,8 +89,6 @@
       <PreprocessorDefinitions>_DEBUG;MASTERSPLINTERLOGIC_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <PrecompiledHeader>Use</PrecompiledHeader>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -110,8 +108,6 @@
       <PreprocessorDefinitions>NDEBUG;MASTERSPLINTERLOGIC_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <PrecompiledHeader>Use</PrecompiledHeader>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -129,8 +125,6 @@
       <PreprocessorDefinitions>_DEBUG;MASTERSPLINTERLOGIC_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <PrecompiledHeader>Use</PrecompiledHeader>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -150,8 +144,6 @@
       <PreprocessorDefinitions>NDEBUG;MASTERSPLINTERLOGIC_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <PrecompiledHeader>Use</PrecompiledHeader>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -164,21 +156,37 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <None Include="cpp.hint" />
+    <!-- Objective-C++ macOS Adapter: carried for reference/version control; MSVC cannot build it,
+         so it is a None item (the macOS Xcode/CMake build compiles it). -->
+    <None Include="Platform\Mac\MacProcessRunner.mm" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="MasterSplinter.Logic.h" />
-    <ClInclude Include="pch.h" />
+    <ClInclude Include="Git\GitBackend.h" />
+    <ClInclude Include="Platform\IProcessRunner.h" />
+    <ClInclude Include="Platform\IPlatformFactory.h" />
+    <ClInclude Include="Platform\Windows\WindowsProcessRunner.h" />
+    <ClInclude Include="Platform\Windows\WindowsPlatformFactory.h" />
+    <ClInclude Include="Platform\Mac\MacProcessRunner.h" />
+    <ClInclude Include="Platform\Mac\MacPlatformFactory.h" />
   </ItemGroup>
   <ItemGroup>
+    <!-- No precompiled header: the Windows-only files include <windows.h> (via framework.h)
+         directly; everything else is portable and includes only what it needs. -->
     <ClCompile Include="dllmain.cpp" />
-    <ClCompile Include="GitBackend.cpp" />
+    <ClCompile Include="Platform\Windows\WindowsProcessRunner.cpp" />
+    <!-- Portable C ABI + core (no <windows.h>). -->
     <ClCompile Include="MasterSplinter.Logic.cpp" />
-    <ClCompile Include="pch.cpp">
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">Create</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
+    <ClCompile Include="GitApi.cpp" />
+    <ClCompile Include="Git\GitBackend.cpp" />
+    <ClCompile Include="Platform\PlatformFactory.cpp" />
+    <ClCompile Include="Platform\Windows\WindowsPlatformFactory.cpp" />
+    <!-- macOS Adapter (Apple frameworks): built only by the macOS toolchain, never by this
+         Windows project. The pure-C++ factory is a real C++ TU kept ExcludedFromBuild; the
+         Objective-C++ runner (.mm) is a <None> item below since MSVC cannot compile it. -->
+    <ClCompile Include="Platform\Mac\MacPlatformFactory.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
     </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

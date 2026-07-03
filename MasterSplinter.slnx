@@ -8,5 +8,6 @@
     <Platform Solution="*|x64" Project="x64" />
     <Deploy />
   </Project>
+  <Project Path="MasterSplinter.Logic.Tests/MasterSplinter.Logic.Tests.vcxproj" Id="0295c78b-ec18-499d-9f32-9f4c82fa8c33" />
   <Project Path="MasterSplinter.Logic/MasterSplinter.Logic.vcxproj" Id="f263fe0e-4d1f-45be-b707-a66d7a19a9c0" />
 </Solution>

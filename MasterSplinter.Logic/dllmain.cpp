@@ -1,9 +1,9 @@
 // dllmain.cpp : Defines the entry point for the DLL application.
-#include "pch.h"
+#include "framework.h"
 
 // DllMain runs under the Windows *loader lock*, so it must stay tiny: no real initialization, no
-// calls into other DLLs, no thread/COM work. It is also Windows-only (no equivalent on Linux or
-// macOS). Real, portable lifecycle therefore lives in MsLogicInitialize()/MsLogicShutdown()
+// calls into other DLLs, no thread/COM work. It is also Windows-only (no equivalent on macOS).
+// Real, portable lifecycle therefore lives in MsLogicInitialize()/MsLogicShutdown()
 // (see MasterSplinter.Logic.cpp), which the host calls explicitly. DllMain is used here only for
 // the one thing it's well-suited to: opting out of per-thread loader callbacks.
 BOOL APIENTRY DllMain(HMODULE hModule,

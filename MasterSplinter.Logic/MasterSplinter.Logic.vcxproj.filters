@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -13,9 +13,24 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Git">
+      <UniqueIdentifier>{a1b2c3d4-0001-4a1a-9b1a-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Platform">
+      <UniqueIdentifier>{a1b2c3d4-0002-4a1a-9b1a-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Platform\Windows">
+      <UniqueIdentifier>{a1b2c3d4-0003-4a1a-9b1a-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Platform\Mac">
+      <UniqueIdentifier>{a1b2c3d4-0004-4a1a-9b1a-000000000004}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <None Include="cpp.hint" />
+    <None Include="Platform\Mac\MacProcessRunner.mm">
+      <Filter>Platform\Mac</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -24,8 +39,26 @@
     <ClInclude Include="MasterSplinter.Logic.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="pch.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="Git\GitBackend.h">
+      <Filter>Git</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\IProcessRunner.h">
+      <Filter>Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\IPlatformFactory.h">
+      <Filter>Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\Windows\WindowsProcessRunner.h">
+      <Filter>Platform\Windows</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\Windows\WindowsPlatformFactory.h">
+      <Filter>Platform\Windows</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\Mac\MacProcessRunner.h">
+      <Filter>Platform\Mac</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\Mac\MacPlatformFactory.h">
+      <Filter>Platform\Mac</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -35,11 +68,23 @@
     <ClCompile Include="dllmain.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="GitBackend.cpp">
+    <ClCompile Include="GitApi.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="pch.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="Git\GitBackend.cpp">
+      <Filter>Git</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform\PlatformFactory.cpp">
+      <Filter>Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform\Windows\WindowsProcessRunner.cpp">
+      <Filter>Platform\Windows</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform\Windows\WindowsPlatformFactory.cpp">
+      <Filter>Platform\Windows</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform\Mac\MacPlatformFactory.cpp">
+      <Filter>Platform\Mac</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
