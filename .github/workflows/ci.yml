@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+
+env:
+  Configuration: Debug
+  TestResultsDirectory: TestResults
+
+jobs:
+  build-and-test:
+    name: Build and unit test (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            runner: windows-2025-vs2026
+            msbuildArchitecture: x64
+          - platform: ARM64
+            runner: windows-11-vs2026-arm
+            msbuildArchitecture: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Set up NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v3
+        with:
+          vs-version: '[18.0,19.0)'
+          msbuild-architecture: ${{ matrix.msbuildArchitecture }}
+
+      - name: Restore native test packages
+        run: nuget restore MasterSplinter.Logic.Tests\packages.config -PackagesDirectory packages
+
+      - name: Build app
+        run: >
+          msbuild MasterSplinter.Entrypoint\MasterSplinter.Entrypoint.csproj
+          -restore
+          -t:Build
+          -p:Configuration=${{ env.Configuration }}
+          -p:Platform=${{ matrix.platform }}
+          -p:GenerateAppxPackageOnBuild=false
+
+      - name: Build unit tests
+        run: >
+          msbuild MasterSplinter.Logic.Tests\MasterSplinter.Logic.Tests.vcxproj
+          -t:Build
+          -p:Configuration=${{ env.Configuration }}
+          -p:Platform=${{ matrix.platform }}
+
+      - name: Run unit tests
+        continue-on-error: true
+        run: |
+          $testResultsPath = Join-Path "${{ env.TestResultsDirectory }}" "${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path $testResultsPath | Out-Null
+          $testExeCandidates = @(
+            ".\${{ matrix.platform }}\${{ env.Configuration }}\MasterSplinter.Logic.Tests.exe",
+            ".\MasterSplinter.Logic.Tests\${{ matrix.platform }}\${{ env.Configuration }}\MasterSplinter.Logic.Tests.exe"
+          )
+          $testExe = $testExeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $testExe) {
+            throw "Could not find MasterSplinter.Logic.Tests.exe in expected build output folders."
+          }
+
+          & $testExe "--gtest_output=xml:$testResultsPath\MasterSplinter.Logic.Tests.${{ matrix.platform }}.xml"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Test report
+        uses: dorny/test-reporter@v3
+        if: ${{ !cancelled() }}
+        with:
+          name: Native unit tests (${{ matrix.platform }})
+          path: ${{ env.TestResultsDirectory }}/${{ matrix.platform }}/*.xml
+          reporter: java-junit
+          fail-on-empty: true
