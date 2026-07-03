@@ -139,7 +139,7 @@ TortoiseGit reads data), exposed via a flat C ABI and consumed from C# by P/Invo
 
 | Layer | File(s) | Role |
 | --- | --- | --- |
-| Native git backend | `MasterSplinter.Logic/GitBackend.cpp`, `MasterSplinter.Logic.h` | `RunGit` (CreateProcessW) + `MsGit*` C-ABI funcs that build git commands and return delimited UTF-8. |
+| Native git backend | `MasterSplinter.Logic/` — `GitApi.cpp`, `Git/GitBackend.cpp`, `Platform/Windows/WindowsProcessRunner.cpp`, `MasterSplinter.Logic.h` | `MsGit*` C-ABI shims → a portable `GitBackend` that builds git commands → an `IProcessRunner` that launches git (`CreateProcessW` on Windows, `NSTask` on macOS). Returns delimited UTF-8. |
 | P/Invoke | `Interop/NativeLogic.cs` | Bindings for `MsGit*`; copy-then-free of returned `char*`. |
 | Git service | `Git/GitRepository.cs` | Parses delimited streams into models (`Open`/`Log`/`ListRefs`/`ChangedFiles`/`Diff`/`FileAt`). |
 | Recents | `Git/RecentRepositoriesStore.cs` | Persists recent repos as JSON in local app data. |
