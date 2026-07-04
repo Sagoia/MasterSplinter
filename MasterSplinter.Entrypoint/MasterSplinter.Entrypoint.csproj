@@ -7,7 +7,9 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
-    <PublishProfile>win-$(Platform).pubxml</PublishProfile>
+    <!-- No publish profile is wired up: the win-<plat>.pubxml files don't exist, and pointing at a
+         missing one emits NETSDK1198 on every build. To set up distribution, add profiles under
+         Properties\PublishProfiles\ and pass -p:PublishProfile=win-x64.pubxml explicitly. -->
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
     <EnableMsixTooling>true</EnableMsixTooling>
@@ -102,8 +104,12 @@
 
   <!-- Publish Properties -->
   <PropertyGroup>
-    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
-    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
+    <!-- ReadyToRun (crossgen) needs a concrete RuntimeIdentifier so the matching runtime pack is
+         restored; without one it fails with NETSDK1094 ("a valid runtime package was not found").
+         Enable it only for non-Debug builds that actually carry a RID (i.e. publish / packaged
+         deploy). A plain RID-less Release build then compiles cleanly instead of erroring. -->
+    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug' and '$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
+    <PublishReadyToRun Condition="'$(PublishReadyToRun)' == ''">false</PublishReadyToRun>
     <!-- WinUI 3 does NOT support trimming. The trimmer removes types that XAML activates via
          reflection (view models, converters, template selectors, CommunityToolkit controls), so a
          trimmed build launches to a blank window / "nothing shows". Keep trimming OFF everywhere. -->
