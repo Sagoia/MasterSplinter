@@ -31,7 +31,6 @@
     <None Include="Platform\Mac\MacProcessRunner.mm">
       <Filter>Platform\Mac</Filter>
     </None>
-    <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">

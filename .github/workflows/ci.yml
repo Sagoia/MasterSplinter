@@ -52,7 +52,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.nuget/packages
-          key: ${{ runner.os }}-${{ matrix.platform }}-nuget-global-${{ hashFiles('**/*.csproj', '**/*.props', '**/*.targets') }}
+          key: ${{ runner.os }}-${{ matrix.platform }}-nuget-global-${{ hashFiles('**/*.csproj', '**/*.vcxproj', '**/*.props', '**/*.targets') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.platform }}-nuget-global-
             ${{ runner.os }}-nuget-global-
@@ -61,7 +61,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: packages
-          key: ${{ runner.os }}-native-nuget-${{ hashFiles('MasterSplinter.Logic.Tests/packages.config') }}
+          key: ${{ runner.os }}-native-nuget-${{ hashFiles('**/packages.config') }}
           restore-keys: |
             ${{ runner.os }}-native-nuget-
 
@@ -87,6 +87,7 @@ jobs:
           -p:Platform=${{ matrix.platform }}
 
       - name: Run unit tests
+        id: run_tests
         continue-on-error: true
         run: |
           $testResultsPath = Join-Path "${{ env.TestResultsDirectory }}" "${{ matrix.platform }}"
@@ -107,7 +108,7 @@ jobs:
 
       - name: Test report
         uses: dorny/test-reporter@v3
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && (steps.run_tests.outcome == 'success' || steps.run_tests.outcome == 'failure') }}
         with:
           name: Native unit tests (${{ matrix.platform }})
           path: ${{ env.TestResultsDirectory }}/${{ matrix.platform }}/*.xml
