@@ -66,7 +66,13 @@
     <NativeLogicDll>$(MSBuildThisFileDirectory)..\MasterSplinter.Logic\$(NativeLogicPlatform)\$(Configuration)\MasterSplinterLogic.dll</NativeLogicDll>
   </PropertyGroup>
   <Target Name="IncludeNativeLogicDll" AfterTargets="ResolveProjectReferences" BeforeTargets="AssignTargetPaths">
-    <ItemGroup Condition="Exists('$(NativeLogicDll)')">
+    <!-- Fail LOUDLY if the native core wasn't built for this config. Previously this Content copy
+         was guarded by Condition="Exists(...)", so a missing DLL was silently skipped and the app
+         then threw DllNotFoundException at startup (MsLogicInitialize) and showed nothing — exactly
+         the "Release doesn't work" symptom. Surfacing it as a build error makes it un-missable. -->
+    <Error Condition="!Exists('$(NativeLogicDll)')"
+           Text="Native core missing: '$(NativeLogicDll)'. MasterSplinter.Logic is a ProjectReference and should build automatically for $(Configuration)|$(Platform); build it for this configuration. Without it the app crashes on launch (DllNotFoundException)." />
+    <ItemGroup>
       <Content Include="$(NativeLogicDll)">
         <Link>MasterSplinterLogic.dll</Link>
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -98,7 +104,9 @@
   <PropertyGroup>
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
-    <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
+    <!-- WinUI 3 does NOT support trimming. The trimmer removes types that XAML activates via
+         reflection (view models, converters, template selectors, CommunityToolkit controls), so a
+         trimmed build launches to a blank window / "nothing shows". Keep trimming OFF everywhere. -->
+    <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
 </Project>
