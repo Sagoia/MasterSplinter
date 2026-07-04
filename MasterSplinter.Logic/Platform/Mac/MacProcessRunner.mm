@@ -1,16 +1,17 @@
 // MacProcessRunner.mm — macOS Adapter implementation (Objective-C++).
 //
-// Uses Apple's Foundation framework (NSTask + NSPipe) to launch git and capture its output — the
-// idiomatic macOS way to run a subprocess, replacing generic POSIX fork/exec. Compiled only by the
-// macOS toolchain (link Foundation.framework); the whole TU is guarded with `#if defined(__APPLE__)`
+// The macOS seam deliberately mixes **Foundation + POSIX** (macOS only — no Linux target):
+//   * Foundation — NSTask/NSPipe launch and capture git's output (NSTask wraps posix_spawn), using
+//                  the modern non-throwing -launchAndReturnError:.
+//   * POSIX      — shell-style exit-code semantics: a process killed by a signal reports 128 + signal
+//                  (as a POSIX shell would), distinguished via NSTask.terminationReason.
+// Compiled only by the macOS toolchain (link Foundation.framework); guarded with `#if defined(__APPLE__)`
 // so a non-Apple compiler produces an empty object.
 //
-// Note on threading / GCD: this Adapter is intentionally SYNCHRONOUS — it blocks until git exits.
-// Running it off the main thread is the caller's concern (just as the Windows app dispatches these
-// via Task.Run), so the Mac frontend owns any Grand Central Dispatch usage. Keeping the runner
-// synchronous keeps the Bridge's contract identical on both platforms. The one place GCD would live
-// *inside* here is if stdout and stderr were separate pipes drained concurrently — we merge them
-// into one pipe (like the Windows runner), so a single blocking read is correct and deadlock-free.
+// Threading/GCD: intentionally SYNCHRONOUS (blocks until git exits). Running it off the main thread is
+// the caller's concern — the Mac frontend owns any Grand Central Dispatch usage — so the Bridge's
+// contract stays identical to the Windows adapter. stdout+stderr are merged into one pipe, so a single
+// blocking read is correct and deadlock-free.
 
 #if defined(__APPLE__)
 
@@ -45,20 +46,16 @@ namespace ms
                 [argv addObject:[NSString stringWithUTF8String:a.c_str()]];
             task.arguments = argv;
 
-            // Merge stdout + stderr into one pipe (same contract as the Windows runner).
+            // Merge stdout + stderr into one pipe (same contract as the Windows runner); NUL stdin.
             NSPipe* pipe = [NSPipe pipe];
             task.standardOutput = pipe;
             task.standardError = pipe;
             task.standardInput = [NSFileHandle fileHandleWithNullDevice];
 
-            @try
-            {
-                [task launch];
-            }
-            @catch (NSException*)
-            {
+            // Modern, non-throwing launch (macOS 10.13+): NO on failure instead of an NSException.
+            NSError* error = nil;
+            if (![task launchAndReturnError:&error])
                 return false; // the process could not be started (e.g. env/git missing)
-            }
 
             // Drain the pipe to EOF *before* waiting, so a large diff can't fill the ~64K pipe
             // buffer and deadlock the child. readDataToEndOfFile returns when git closes the pipe.
@@ -68,7 +65,13 @@ namespace ms
             // NSData length is authoritative: binary-safe, embedded NULs preserved (image bytes).
             if (data.length > 0)
                 out.assign(static_cast<const char*>(data.bytes), data.length);
-            exitCode = static_cast<int>(task.terminationStatus);
+
+            // POSIX exit-code semantics: a signal-terminated child reports 128 + signal (shell
+            // convention); a normal exit reports its status directly.
+            if (task.terminationReason == NSTaskTerminationReasonUncaughtSignal)
+                exitCode = 128 + static_cast<int>(task.terminationStatus);
+            else
+                exitCode = static_cast<int>(task.terminationStatus);
             return true;
         }
     }

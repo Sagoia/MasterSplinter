@@ -1,9 +1,9 @@
 #pragma once
 // WindowsProcessRunner — the Windows Adapter.
 //
-// Adapts the Win32 process API (CreateProcessW + anonymous pipes, plus UTF-8<->UTF-16
-// conversion and CommandLineToArgvW-compatible argument quoting) to IProcessRunner. The .cpp
-// is the ONLY translation unit in the core that includes <windows.h> (via pch.h) — all the
+// Adapts the Windows process API to IProcessRunner, mixing classic Win32 (CreateProcessW + pipes,
+// arg quoting) with modern C++/WinRT (string conversion) and WIL (RAII handles). The .cpp is the
+// ONLY translation unit in the core that includes <windows.h> (via framework.h) — all the
 // platform-specific launch code lives there so nothing else depends on Windows headers.
 
 #include "../IProcessRunner.h"

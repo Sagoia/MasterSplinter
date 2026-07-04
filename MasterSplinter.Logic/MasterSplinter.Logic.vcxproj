@@ -82,6 +82,12 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetName>MasterSplinterLogic</TargetName>
   </PropertyGroup>
+  <!-- C++/WinRT (consumed by the Windows adapter) requires C++ exceptions. -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -188,6 +194,12 @@
     <ClCompile Include="Platform\Mac\MacPlatformFactory.cpp">
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </ClCompile>
+  </ItemGroup>
+  <!-- Modern Windows APIs used ONLY by the Windows adapter (Platform/Windows/*). The portable
+       core does not include them, and the macOS build ignores these Windows-only packages. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.CppWinRT" Version="2.0.240111.5" />
+    <PackageReference Include="Microsoft.Windows.ImplementationLibrary" Version="1.0.240122.1" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
