@@ -115,4 +115,12 @@
          trimmed build launches to a blank window / "nothing shows". Keep trimming OFF everywhere. -->
     <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
+
+  <!-- Memory profile: a desktop app wants Workstation GC (small working set, low latency).
+       Server GC would trade memory for throughput and raise idle memory. These are already
+       the WinUI defaults; stated explicitly so they can't silently flip. -->
+  <PropertyGroup>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
 </Project>

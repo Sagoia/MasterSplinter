@@ -121,11 +121,21 @@
       <PreprocessorDefinitions>NDEBUG;MASTERSPLINTERLOGIC_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <!-- Make the (already-applied) max-speed optimization explicit, and add two free
+           size/memory wins: /GF pools identical string literals, /Gw optimizes global
+           data so the linker's /OPT:REF can drop unused globals. -->
+      <Optimization>MaxSpeed</Optimization>
+      <StringPooling>true</StringPooling>
+      <AdditionalOptions>/Gw %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
+      <!-- Explicit /OPT:REF + /OPT:ICF (strip unreferenced code, fold identical COMDATs).
+           Already on by default in Release; stated here so it can't silently regress. -->
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -157,11 +167,17 @@
       <PreprocessorDefinitions>NDEBUG;MASTERSPLINTERLOGIC_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <!-- Keep ARM64 Release identical to x64: explicit /O2 plus the free /GF + /Gw wins. -->
+      <Optimization>MaxSpeed</Optimization>
+      <StringPooling>true</StringPooling>
+      <AdditionalOptions>/Gw %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
