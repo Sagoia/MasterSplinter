@@ -216,6 +216,64 @@ namespace ms
         return RunGitC(root, args, code);
     }
 
+    // ---- Working tree (Phase 3) ----------------------------------------------------------------
+
+    std::string GitBackend::Status(const std::string& root) const
+    {
+        if (root.empty())
+            return std::string();
+        // --no-optional-locks: a plain `git status` opportunistically rewrites .git/index, which
+        // would re-trigger the app's own file watcher and loop forever.
+        // -z: NUL-separated records, paths unquoted; a rename record is "XY new\0orig\0" (new path
+        // first — reversed vs the human-readable format).
+        int code;
+        std::string out = RunGitC(root,
+            { "--no-optional-locks", "-c", "core.quotePath=false", "status", "--porcelain=v1",
+              "-z", "--untracked-files=all" },
+            code);
+        if (code != 0)
+            return std::string();
+        // A char* return is truncated at the first NUL by the managed marshaller, so translate
+        // every NUL separator to the RS (0x1E) record separator the C# side already splits on.
+        for (char& c : out)
+        {
+            if (c == '\0')
+                c = '\x1e';
+        }
+        return out;
+    }
+
+    std::string GitBackend::WorkTreeFileDiff(const std::string& root, const std::string& path,
+                                             int area, int wsMode) const
+    {
+        if (root.empty() || path.empty() || area < 0 || area > 2)
+            return std::string();
+        // --no-optional-locks: like `status`, a worktree `diff` opportunistically refreshes the
+        // index stat cache (writing .git/index), which would re-trigger the app's file watcher.
+        std::vector<std::string> args = { "--no-optional-locks", "diff" };
+        if (area == 1)
+            args.push_back("--cached"); // staged: index vs HEAD
+        args.push_back("--no-color");
+        if (wsMode == 1) args.push_back("--ignore-space-change");
+        else if (wsMode == 2) args.push_back("--ignore-all-space");
+        if (area == 2)
+        {
+            // Untracked: synthesize an all-added unified diff. Git (including Git for Windows)
+            // special-cases the literal path /dev/null. NOTE: --no-index exits 1 when the files
+            // differ — that is the success case here, so the exit code is deliberately ignored.
+            args.push_back("--no-index");
+            args.push_back("--");
+            args.push_back("/dev/null");
+        }
+        else
+        {
+            args.push_back("--");
+        }
+        args.push_back(path);
+        int code;
+        return RunGitC(root, args, code);
+    }
+
     std::optional<std::string> GitBackend::FileBytesAt(const std::string& root, const std::string& sha,
                                                        const std::string& path) const
     {

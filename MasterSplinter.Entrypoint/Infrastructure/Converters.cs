@@ -37,6 +37,8 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         public const int More = 0xE712;
         public const int Search = 0xE721;
         public const int Cancel = 0xE711;
+        public const int Unknown = 0xE9CE;
+        public const int Refresh = 0xE72C;
     }
 
     public sealed class BoolToVisibilityConverter : IValueConverter
@@ -113,12 +115,14 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         private static readonly SolidColorBrush Modified = new(Color.FromArgb(0xFF, 0xD2, 0x99, 0x22));
         private static readonly SolidColorBrush Deleted = new(Color.FromArgb(0xFF, 0xCF, 0x22, 0x2E));
         private static readonly SolidColorBrush Renamed = new(Color.FromArgb(0xFF, 0x58, 0x6A, 0xE3));
+        private static readonly SolidColorBrush Untracked = new(Color.FromArgb(0xFF, 0x82, 0x50, 0xDF));
         public object Convert(object value, Type t, object p, string l) => value switch
         {
             FileChangeStatus.Added => Added,
             FileChangeStatus.Modified => Modified,
             FileChangeStatus.Deleted => Deleted,
             FileChangeStatus.Renamed => Renamed,
+            FileChangeStatus.Untracked => Untracked,
             _ => Modified
         };
         public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();
@@ -144,6 +148,7 @@ namespace MasterSplinter.Entrypoint.Infrastructure
             FileChangeStatus.Modified => Glyphs.Edit,
             FileChangeStatus.Deleted => Glyphs.Remove,
             FileChangeStatus.Renamed => Glyphs.Forward,
+            FileChangeStatus.Untracked => Glyphs.Unknown,
             _ => Glyphs.Edit
         });
         public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();

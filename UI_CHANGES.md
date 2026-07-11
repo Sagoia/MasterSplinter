@@ -20,7 +20,22 @@ see [README](README.md) for the backend and architecture.
   lane/dot/merge graph; Description shows inline ref badges + the commit message.
 - **Detail + diff** (resizable split) — commit metadata + changed files (status icons), and the diff viewer
   (unified/side-by-side, syntax highlighting, whitespace options, binary/image). Mode tabs are a `SelectorBar`
-  docked under the file list.
+  docked under the file list; **File Status ↔ Log / History** switches the panel between the working-copy
+  status view and the selected commit's files (selecting a commit also returns to history).
+- **Working copy (Phase 3)** — entered from the sidebar "Working Copy" node or the File Status tab. One
+  grouped `ListView` (`CollectionViewSource IsSourceGrouped`, `GroupStyle.HidesIfEmpty`; the group class *is*
+  an `ObservableCollection<ChangedFile>`, and its `Source` must be set in code-behind) shows
+  **Staged / Unstaged / Untracked** sections with counts; renames render `old → new`; a file staged and
+  modified again appears in both sections. Selection feeds the same diff panel (staged = index↔HEAD,
+  unstaged = worktree↔index, untracked = synthesized all-added via `--no-index`). Context menu:
+  Open in External Editor (command template with `{path}` under Tools ▸ Options…, blank = shell default —
+  launched with `UseShellExecute=true`, since bare `CreateProcess` dies on App-Execution-Alias exes like
+  notepad), Reveal in Explorer (path must be backslash-normalized or `/select` silently ignores it), Copy Path.
+- **Refresh** — toolbar button, View ▸ Refresh, F5 / Ctrl+R (accelerators duplicated on the workspace root:
+  `MenuFlyoutItem` accelerators are unreliable in WinUI 3 while the flyout is closed). A `FileSystemWatcher`
+  (500 ms debounce on a `DispatcherQueueTimer`, `.git` noise filtered to index/HEAD/refs) auto-refreshes:
+  worktree edits reload status, `.git` changes reload branch + log + status; selection is restored by
+  (area, path) since every refresh rebuilds the item objects.
 - Panes resize via CommunityToolkit `GridSplitter` (12px gutters + Min/Max on the resized definitions).
 
 ## Theming — `Themes/AppResources.xaml`

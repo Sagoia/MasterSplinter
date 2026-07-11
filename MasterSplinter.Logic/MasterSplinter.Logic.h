@@ -77,6 +77,21 @@ extern "C" {
 	MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
 	                                                 const char* path, int wsMode);
 
+	// ---- Working tree status (Phase 3) ---------------------------------------------------------
+
+	// git status --porcelain=v1 -z with every NUL separator translated to 0x1E (a NUL-separated
+	// payload would be truncated at the first NUL by the managed marshaller). Records are
+	// "XY <path>"; when X or Y is R/C the record is followed by one extra record holding the
+	// ORIGINAL path (new path first — -z order is reversed vs the human-readable format).
+	// Untracked files appear as "?? <path>" (--untracked-files=all). Empty string on error.
+	MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root);
+
+	// Unified diff for one working-tree file. area: 0 = unstaged (worktree vs index),
+	// 1 = staged (index vs HEAD, --cached), 2 = untracked (--no-index vs /dev/null, i.e. the
+	// whole file as additions). wsMode as in MsGitFileDiff.
+	MASTERSPLINTERLOGIC_API char* MsGitWorkTreeFileDiff(const char* root, const char* path,
+	                                                    int area, int wsMode);
+
 	// Raw bytes of a file as of a commit/ref (git show <sha>:<path>), for binary/image previews.
 	// Unlike the char*-as-string returns, the payload MAY contain NUL bytes; *outLen holds the
 	// length and the caller must copy exactly that many bytes (not strlen). Returns nullptr on error.

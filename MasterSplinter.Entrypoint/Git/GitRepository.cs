@@ -225,8 +225,82 @@ namespace MasterSplinter.Entrypoint.Git
             'D' => FileChangeStatus.Deleted,
             'R' => FileChangeStatus.Renamed,
             'C' => FileChangeStatus.Renamed,
+            '?' => FileChangeStatus.Untracked,
             _ => FileChangeStatus.Modified, // M, T, U, ...
         };
+
+        // ---- Working tree status (STATUS-001/002) ------------------------------------------------
+
+        public sealed record WorkTreeStatus(List<ChangedFile> Staged, List<ChangedFile> Unstaged,
+                                            List<ChangedFile> Untracked);
+
+        /// <summary>
+        /// Snapshot of the working tree: staged / unstaged / untracked entries. A file that is both
+        /// staged and modified again (XY = "MM") appears once in each of the two sections.
+        /// </summary>
+        public WorkTreeStatus Status()
+        {
+            var staged = new List<ChangedFile>();
+            var unstaged = new List<ChangedFile>();
+            var untracked = new List<ChangedFile>();
+
+            // porcelain v1 -z records ("XY <path>"), with NUL separators already translated to RS
+            // by the native layer. A rename/copy record is followed by one extra record holding the
+            // ORIGINAL path (-z puts the new path first).
+            string[] records = NativeLogic.GitStatus(RootPath).Split(RS);
+            for (int i = 0; i < records.Length; i++)
+            {
+                string rec = records[i];
+                if (rec.Length < 4 || rec[2] != ' ')
+                    continue;
+
+                char x = rec[0], y = rec[1];
+                string path = rec[3..];
+                string oldPath = "";
+                if (x is 'R' or 'C' || y is 'R' or 'C')
+                {
+                    i++;
+                    if (i < records.Length)
+                        oldPath = records[i];
+                }
+
+                if (x == '?' && y == '?')
+                {
+                    untracked.Add(new ChangedFile
+                    {
+                        Path = path,
+                        Status = FileChangeStatus.Untracked,
+                        Area = WorkTreeArea.Untracked,
+                        IsWorkingTree = true,
+                    });
+                    continue;
+                }
+
+                if (x is not ' ' and not '?')
+                {
+                    staged.Add(new ChangedFile
+                    {
+                        Path = path,
+                        OldPath = x is 'R' or 'C' ? oldPath : "",
+                        Status = MapStatus(x),
+                        Area = WorkTreeArea.Staged,
+                        IsWorkingTree = true,
+                    });
+                }
+                if (y is not ' ' and not '?')
+                {
+                    unstaged.Add(new ChangedFile
+                    {
+                        Path = path,
+                        OldPath = y is 'R' or 'C' ? oldPath : "",
+                        Status = MapStatus(y),
+                        Area = WorkTreeArea.Unstaged,
+                        IsWorkingTree = true,
+                    });
+                }
+            }
+            return new WorkTreeStatus(staged, unstaged, untracked);
+        }
 
         // ---- Diff summary stats (DIFF-001) -----------------------------------------------------
 
@@ -257,6 +331,20 @@ namespace MasterSplinter.Entrypoint.Git
 
         public (List<DiffLine> Lines, bool IsBinary) RangeDiff(string a, string b, string path, WhitespaceMode ws)
             => ParseUnifiedDiff(NativeLogic.GitRangeFileDiff(RootPath, a, b, path, WsFlag(ws)));
+
+        /// <summary>Diff for one working-tree file (STATUS-005). The area picks worktree-vs-index,
+        /// index-vs-HEAD (staged), or an all-added synthesized diff for untracked files.</summary>
+        public (List<DiffLine> Lines, bool IsBinary) WorkTreeDiff(string path, WorkTreeArea area, WhitespaceMode ws)
+            => ParseUnifiedDiff(NativeLogic.GitWorkTreeFileDiff(RootPath, path, AreaFlag(area), WsFlag(ws)));
+
+        // The native ABI's area contract (0 = unstaged, 1 = staged, 2 = untracked) is independent
+        // of the C# enum's declaration order — map explicitly, like WsFlag.
+        private static int AreaFlag(WorkTreeArea a) => a switch
+        {
+            WorkTreeArea.Staged => 1,
+            WorkTreeArea.Untracked => 2,
+            _ => 0,
+        };
 
         private static int WsFlag(WhitespaceMode m) => m switch
         {

@@ -42,6 +42,9 @@ namespace ms
         std::string RangeShortStat(const std::string& root, const std::string& a, const std::string& b) const;
         std::string RangeFileDiff(const std::string& root, const std::string& a, const std::string& b,
                                   const std::string& path, int wsMode) const;
+        std::string Status(const std::string& root) const;
+        std::string WorkTreeFileDiff(const std::string& root, const std::string& path,
+                                     int area, int wsMode) const;
 
         // Raw bytes of a file at a commit/ref (binary-safe). nullopt if git failed (so the C ABI
         // can return nullptr, as before); otherwise the payload, whose length is value().size().

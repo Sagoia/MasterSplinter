@@ -20,6 +20,8 @@ namespace MasterSplinter.Entrypoint.ViewModels
 
         private GitRepository? _repo;
         private List<CommitRow> _allCommits = new();
+        private RepositoryWatcher? _watcher;
+        private readonly Microsoft.UI.Dispatching.DispatcherQueue? _dispatcherQueue;
 
         public ObservableCollection<CommitRow> Commits { get; } = new();
         public ObservableCollection<SidebarItemVM> Sidebar { get; } = new();
@@ -35,6 +37,9 @@ namespace MasterSplinter.Entrypoint.ViewModels
 
         public MainViewModel()
         {
+            // The VM is created by the workspace control on the UI thread; the watcher needs this
+            // queue to debounce and call back on that thread (STATUS-004).
+            _dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
             foreach (var r in RecentRepositoriesStore.Load())
                 Recent.Add(r);
         }
@@ -82,7 +87,18 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 if (Set(ref _selectedCommit, value))
                 {
                     if (IsCompareMode) ClearCompareState(); // picking a commit leaves compare mode
-                    SelectedFile = null; // clear the detail/diff while the new commit's files load
+                    if (IsWorkingCopyMode && !IsLoading && value != null)
+                    {
+                        // Picking a commit also leaves the working-copy view (but not when a
+                        // refresh/reload is programmatically restoring the selection).
+                        IsWorkingCopyMode = false;
+                        StatusGroups.Clear();
+                    }
+                    // Clear the detail/diff while the new commit's files load — but not in
+                    // working-copy mode (a background refresh must keep the status selection,
+                    // which LoadStatusAsync then restores by area + path).
+                    if (!IsWorkingCopyMode)
+                        SelectedFile = null;
                     if (value != null)
                     {
                         _ = LoadFilesForAsync(value);
@@ -197,7 +213,14 @@ namespace MasterSplinter.Entrypoint.ViewModels
         public bool IsCompareMode
         {
             get => _isCompareMode;
-            private set { if (Set(ref _isCompareMode, value)) Raise(nameof(IsSingleCommitMode)); }
+            private set
+            {
+                if (Set(ref _isCompareMode, value))
+                {
+                    Raise(nameof(IsSingleCommitMode));
+                    Raise(nameof(ShowCommitPane));
+                }
+            }
         }
         public bool IsSingleCommitMode => !_isCompareMode;
 
@@ -268,6 +291,112 @@ namespace MasterSplinter.Entrypoint.ViewModels
             _compareBase = null;
             _compareTarget = null;
             CompareTitle = "";
+        }
+
+        // ---- Working copy / file status (STATUS-001/002/005) ------------------------------------
+
+        /// <summary>Grouped status sections (staged / unstaged / untracked) for the working-copy list.</summary>
+        public ObservableCollection<ChangedFileGroup> StatusGroups { get; } = new();
+
+        private bool _isWorkingCopyMode;
+        public bool IsWorkingCopyMode
+        {
+            get => _isWorkingCopyMode;
+            private set
+            {
+                if (Set(ref _isWorkingCopyMode, value))
+                    Raise(nameof(ShowCommitPane));
+            }
+        }
+
+        /// <summary>The commit metadata pane shows only in plain single-commit history view.</summary>
+        public bool ShowCommitPane => !IsCompareMode && !IsWorkingCopyMode;
+
+        /// <summary>Switch the bottom-left panel to the working-copy status view and (re)load it.</summary>
+        public async Task EnterWorkingCopyAsync()
+        {
+            if (_repo == null) return;
+            if (IsCompareMode) ClearCompareState();
+
+            var wc = Sidebar.FirstOrDefault(i => i.Kind == SidebarKind.WorkingCopy);
+            if (wc != null)
+            {
+                foreach (var i in Sidebar) i.IsSelected = false;
+                wc.IsSelected = true;
+            }
+
+            if (!IsWorkingCopyMode)
+            {
+                IsWorkingCopyMode = true;
+                SelectedFile = null;
+                PanelFiles.Clear();
+                ChangedSummary = "";
+                UpdateDiffViewState();
+            }
+            await LoadStatusAsync();
+        }
+
+        /// <summary>Return the bottom-left panel to the selected commit's history file list.</summary>
+        public void ExitWorkingCopy()
+        {
+            if (!IsWorkingCopyMode) return;
+            IsWorkingCopyMode = false;
+            StatusGroups.Clear();
+            SelectedFile = null;
+            PanelFiles.Clear();
+            ChangedSummary = "";
+
+            // Move the sidebar highlight back from "Working Copy" to the current branch.
+            foreach (var i in Sidebar) i.IsSelected = false;
+            var current = Sidebar.FirstOrDefault(
+                i => i.Kind == SidebarKind.Branch && i.Text == Repository?.Branch);
+            if (current != null) current.IsSelected = true;
+
+            CommitRow? commit = SelectedCommit;
+            if (commit != null)
+                _ = LoadFilesForAsync(commit);
+            UpdateDiffViewState();
+        }
+
+        private async Task LoadStatusAsync()
+        {
+            if (_repo == null) return;
+            GitRepository repo = _repo;
+
+            // Every load rebuilds the ChangedFile objects, so remember selection by (Area, Path).
+            WorkTreeArea? prevArea = SelectedFile?.IsWorkingTree == true ? SelectedFile.Area : null;
+            string? prevPath = SelectedFile?.Path;
+
+            try
+            {
+                var st = await Task.Run(() => repo.Status());
+                if (!IsWorkingCopyMode) return; // left the view while loading
+
+                StatusGroups.Clear();
+                AddStatusGroup("Staged files", st.Staged);
+                AddStatusGroup("Unstaged files", st.Unstaged);
+                AddStatusGroup("Untracked files", st.Untracked);
+
+                int total = st.Staged.Count + st.Unstaged.Count + st.Untracked.Count;
+                ChangedSummary = total == 0
+                    ? "Working tree clean"
+                    : $"{st.Staged.Count} staged  ·  {st.Unstaged.Count} unstaged  ·  {st.Untracked.Count} untracked";
+
+                ChangedFile? restore = StatusGroups.SelectMany(g => g)
+                        .FirstOrDefault(f => prevArea != null && f.Area == prevArea && f.Path == prevPath)
+                    ?? StatusGroups.SelectMany(g => g).FirstOrDefault();
+                SelectedFile = restore;
+                UpdateDiffViewState();
+            }
+            catch (Exception ex) { ErrorMessage = ex.Message; }
+        }
+
+        private void AddStatusGroup(string title, List<ChangedFile> files)
+        {
+            if (files.Count == 0) return;
+            var group = new ChangedFileGroup { Title = $"{title} ({files.Count})" };
+            foreach (var f in files) group.Add(f);
+            StatusGroups.Add(group);
         }
 
         // ---- Binary / image diff (DIFF-005) ----------------------------------------------------
@@ -384,6 +513,12 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 _repo = repo;
                 Repository = repo.ToInfo();
 
+                // Watch for external changes (STATUS-004); null when the folder can't be watched.
+                _watcher?.Dispose();
+                _watcher = _dispatcherQueue == null
+                    ? null
+                    : RepositoryWatcher.TryCreate(repo.RootPath, _dispatcherQueue, OnRepositoryChanged);
+
                 // Update recents (CORE-002).
                 var recent = await Task.Run(() => RecentRepositoriesStore.Add(repo.ToInfo()));
                 Recent.Clear();
@@ -412,15 +547,75 @@ namespace MasterSplinter.Entrypoint.ViewModels
             }
         }
 
+        /// <summary>Reload branch, refs, log, and (when shown) working-tree status (STATUS-003).</summary>
+        public async Task RefreshAsync()
+        {
+            if (_repo == null || IsLoading) return;
+            GitRepository repo = _repo;
+            string? prevSha = SelectedCommit?.FullHash;
+            bool wasWorkingCopy = IsWorkingCopyMode;
+
+            ErrorMessage = null;
+            IsLoading = true;
+            try
+            {
+                // Re-open to pick up branch/HEAD changes made outside the app.
+                string? error = null;
+                GitRepository? reopened = await Task.Run(() => GitRepository.Open(repo.RootPath, out error));
+                if (reopened != null)
+                {
+                    _repo = reopened;
+                    repo = reopened;
+                    Repository = reopened.ToInfo();
+                }
+
+                var refs = await Task.Run(() => repo.ListRefs());
+                BuildSidebar(refs, repo.Branch);
+                _refNames = new List<string> { "HEAD" };
+                _refNames.AddRange(refs.Branches);
+                _refNames.AddRange(refs.Remotes);
+                _refNames.AddRange(refs.Tags);
+                Raise(nameof(CompareRefNames));
+
+                var commits = await Task.Run(() => repo.Log(SelectedOrderIndex, MaxCommits));
+                _allCommits = commits.ToList();
+                ApplyFilter();
+                // Rebuilt rows are new objects, so restore the selection by hash; the fresh row
+                // lazily reloads its files/diff, which is exactly what a refresh should do.
+                SelectedCommit = (prevSha != null ? Commits.FirstOrDefault(c => c.FullHash == prevSha) : null)
+                                 ?? Commits.FirstOrDefault();
+            }
+            catch (Exception ex) { ErrorMessage = ex.Message; }
+            finally { IsLoading = false; }
+
+            if (wasWorkingCopy)
+                await EnterWorkingCopyAsync(); // restore the working-copy view with fresh status
+        }
+
+        /// <summary>Debounced watcher callback (UI thread). repoDirty = .git state changed.</summary>
+        private void OnRepositoryChanged(bool repoDirty)
+        {
+            if (_repo == null || IsLoading) return;
+            if (repoDirty)
+                _ = RefreshAsync();          // commit/checkout/stage happened outside the app
+            else if (IsWorkingCopyMode)
+                _ = LoadStatusAsync();       // plain file edits only affect the status view
+            // Otherwise nothing: entering the working-copy view always loads a fresh status.
+        }
+
         /// <summary>Return to the empty/home state (no repository open).</summary>
         public void CloseRepository()
         {
+            _watcher?.Dispose();
+            _watcher = null;
             _repo = null;
             Repository = null;
             _allCommits = new List<CommitRow>();
             Commits.Clear();
             Sidebar.Clear();
             ClearCompareState();
+            IsWorkingCopyMode = false;
+            StatusGroups.Clear();
             _markedCommit = null;
             Raise(nameof(HasMarkedCommit));
             PanelFiles.Clear();
@@ -499,7 +694,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 catch (Exception ex) { ErrorMessage = ex.Message; }
             }
 
-            if (!ReferenceEquals(commit, SelectedCommit) || IsCompareMode)
+            if (!ReferenceEquals(commit, SelectedCommit) || IsCompareMode || IsWorkingCopyMode)
                 return;
 
             // Mirror this commit's files into the shared panel and load the change summary (DIFF-001).
@@ -525,14 +720,16 @@ namespace MasterSplinter.Entrypoint.ViewModels
             if (_repo == null) return;
             GitRepository repo = _repo;
 
-            bool range = IsCompareMode && _compareBase != null && _compareTarget != null;
+            bool worktree = file.IsWorkingTree;
+            bool range = !worktree && IsCompareMode && _compareBase != null && _compareTarget != null;
             CommitRow? commit = SelectedCommit;
-            if (!range && commit == null) return;
+            if (!worktree && !range && commit == null) return;
             if (file.DiffLoaded) { UpdateDiffViewState(); return; }
 
-            string baseRef = range ? _compareBase! : commit!.FullHash;
-            string targetRef = range ? _compareTarget! : commit!.FullHash;
+            string baseRef = range ? _compareBase! : commit?.FullHash ?? "";
+            string targetRef = range ? _compareTarget! : commit?.FullHash ?? "";
             string path = file.Path;
+            WorkTreeArea area = file.Area;
             WhitespaceMode ws = _whitespace;
             string langId = DiffLanguages.IdForPath(path);
 
@@ -540,9 +737,11 @@ namespace MasterSplinter.Entrypoint.ViewModels
             {
                 var result = await Task.Run(() =>
                 {
-                    var (lines, isBinary) = range
-                        ? repo.RangeDiff(baseRef, targetRef, path, ws)
-                        : repo.FileDiff(targetRef, path, ws);
+                    var (lines, isBinary) = worktree
+                        ? repo.WorkTreeDiff(path, area, ws)
+                        : range
+                            ? repo.RangeDiff(baseRef, targetRef, path, ws)
+                            : repo.FileDiff(targetRef, path, ws);
                     foreach (DiffLine d in lines) d.LanguageId = langId;
                     List<DiffRow> rows = isBinary ? new List<DiffRow>() : SideBySideBuilder.Build(lines, langId);
                     return (lines, rows, isBinary);
@@ -561,8 +760,48 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 {
                     UpdateDiffViewState();
                     if (result.isBinary)
-                        await LoadBinaryPreviewAsync(file, baseRef, targetRef, range);
+                    {
+                        if (worktree)
+                            await LoadWorkTreeBinaryPreviewAsync(file);
+                        else
+                            await LoadBinaryPreviewAsync(file, baseRef, targetRef, range);
+                    }
                 }
+            }
+            catch (Exception ex) { ErrorMessage = ex.Message; }
+        }
+
+        /// <summary>Binary/image preview for a working-tree file: new side from disk, old side from HEAD.</summary>
+        private async Task LoadWorkTreeBinaryPreviewAsync(ChangedFile file)
+        {
+            BinaryOldImage = null;
+            BinaryNewImage = null;
+            BinaryHasImages = false;
+            BinaryInfoText = $"Binary file — {file.Path}";
+
+            if (_repo == null) return;
+            GitRepository repo = _repo;
+
+            string ext = Path.GetExtension(file.Path).ToLowerInvariant();
+            bool isImage = ext is ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".webp" or ".ico";
+            if (!isImage) return;
+
+            try
+            {
+                string abs = Path.Combine(repo.RootPath, file.Path.Replace('/', Path.DirectorySeparatorChar));
+                byte[] newBytes = file.Status == FileChangeStatus.Deleted || !File.Exists(abs)
+                    ? Array.Empty<byte>()
+                    : await Task.Run(() => File.ReadAllBytes(abs));
+                string oldSidePath = file.OldPath.Length > 0 ? file.OldPath : file.Path;
+                byte[] oldBytes = file.Status is FileChangeStatus.Added or FileChangeStatus.Untracked
+                    ? Array.Empty<byte>()
+                    : await Task.Run(() => repo.FileBytesAt("HEAD", oldSidePath));
+
+                if (!ReferenceEquals(file, SelectedFile)) return;
+
+                BinaryNewImage = await BytesToImageAsync(newBytes);
+                BinaryOldImage = await BytesToImageAsync(oldBytes);
+                BinaryHasImages = BinaryNewImage != null || BinaryOldImage != null;
             }
             catch (Exception ex) { ErrorMessage = ex.Message; }
         }
@@ -646,6 +885,11 @@ namespace MasterSplinter.Entrypoint.ViewModels
             if (item.IsHeader) { ToggleSidebar(item); return; }
             foreach (var i in Sidebar) i.IsSelected = false;
             item.IsSelected = true;
+            if (item.Kind == SidebarKind.WorkingCopy)
+            {
+                _ = EnterWorkingCopyAsync(); // STATUS-001: switch to the working-copy view
+                return;
+            }
             if (item.IsExpandable) ToggleSidebar(item); // e.g. a remote node
         }
 

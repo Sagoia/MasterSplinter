@@ -68,7 +68,12 @@
                 </MenuBarItem>
                 <MenuBarItem Title="View">
                     <MenuFlyoutItem Text="Toggle Light / Dark Theme" Click="ToggleTheme_Click" />
-                    <MenuFlyoutItem Text="Refresh" />
+                    <MenuFlyoutItem Text="Refresh" Click="Refresh_Click">
+                        <MenuFlyoutItem.KeyboardAccelerators>
+                            <KeyboardAccelerator Key="F5" />
+                            <KeyboardAccelerator Key="R" Modifiers="Control" />
+                        </MenuFlyoutItem.KeyboardAccelerators>
+                    </MenuFlyoutItem>
                     <MenuFlyoutSeparator />
                     <MenuFlyoutItem Text="Show Sidebar" />
                     <MenuFlyoutItem Text="Show Diff Panel" />
@@ -90,7 +95,7 @@
                     <MenuFlyoutItem Text="Stash" />
                 </MenuBarItem>
                 <MenuBarItem Title="Tools">
-                    <MenuFlyoutItem Text="Options…" />
+                    <MenuFlyoutItem Text="Options…" Click="Options_Click" />
                     <MenuFlyoutItem Text="Open in Terminal" />
                     <MenuFlyoutItem Text="Open in Explorer" />
                 </MenuBarItem>

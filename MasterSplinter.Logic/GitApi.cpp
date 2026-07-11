@@ -126,6 +126,17 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, co
     return DupString(Backend().RangeFileDiff(Str(root), Str(a), Str(b), Str(path), wsMode));
 }
 
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root)
+{
+    return DupString(Backend().Status(Str(root)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitWorkTreeFileDiff(const char* root, const char* path,
+                                                               int area, int wsMode)
+{
+    return DupString(Backend().WorkTreeFileDiff(Str(root), Str(path), area, wsMode));
+}
+
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileBytesAtCommit(const char* root, const char* sha,
                                                                 const char* path, int* outLen)
 {

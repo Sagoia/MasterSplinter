@@ -288,10 +288,20 @@
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         </Style>
 
+        <!-- Grouped working-copy status list (STATUS-002). Source is set in code-behind
+             (Vm.StatusGroups) because the DataContext is not available to resources. -->
+        <CollectionViewSource x:Name="StatusGroupsView" IsSourceGrouped="True" />
+
     </UserControl.Resources>
 
     <!-- ============================================================ LAYOUT -->
     <Grid Background="{ThemeResource AppBackgroundBrush}">
+        <!-- Refresh accelerators live here as well as on the View ▸ Refresh menu item, because
+             MenuFlyoutItem accelerators are unreliable in WinUI 3 while the flyout is closed. -->
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="F5" Invoked="RefreshAccelerator_Invoked" />
+            <KeyboardAccelerator Key="R" Modifiers="Control" Invoked="RefreshAccelerator_Invoked" />
+        </Grid.KeyboardAccelerators>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <!-- error bar -->
@@ -330,6 +340,7 @@
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <Rectangle Width="1" Height="38" Fill="{ThemeResource DividerBrush}" Margin="6,0" />
+                    <ctl:ToolButton x:Name="RefreshBtn" Glyph="&#xE72C;" Label="Refresh" Click="Refresh_Click" />
                     <ctl:ToolButton Glyph="&#xE7C1;" Label="Git Flow" />
                     <ctl:ToolButton Glyph="&#xE756;" Label="Terminal" />
                     <ctl:ToolButton Glyph="&#xE8B7;" Label="Explorer" />
@@ -543,7 +554,7 @@
 
                             <!-- metadata -->
                             <Grid Grid.Row="0" Padding="12,10,12,6" ColumnSpacing="10" RowSpacing="3"
-                                  Visibility="{Binding IsSingleCommitMode, Converter={StaticResource BoolToVis}}">
+                                  Visibility="{Binding ShowCommitPane, Converter={StaticResource BoolToVis}}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
@@ -586,7 +597,7 @@
                             <!-- full commit message -->
                             <Border Grid.Row="1" Margin="12,2,12,8" Padding="10,8" CornerRadius="4"
                                     Background="{ThemeResource ToolAreaBrush}" BorderBrush="{ThemeResource DividerBrush}" BorderThickness="1"
-                                    Visibility="{Binding IsSingleCommitMode, Converter={StaticResource BoolToVis}}">
+                                    Visibility="{Binding ShowCommitPane, Converter={StaticResource BoolToVis}}">
                                 <TextBlock Text="{Binding SelectedCommit.FullMessage}" TextWrapping="Wrap"
                                            IsTextSelectionEnabled="True"
                                            Foreground="{ThemeResource TextPrimaryBrush}" FontSize="13" />
@@ -595,15 +606,82 @@
                             <!-- changed files header -->
                             <Border Grid.Row="2" Background="{ThemeResource HeaderRowBrush}" BorderBrush="{ThemeResource DividerBrush}"
                                     BorderThickness="0,1,0,1" Height="26" Padding="12,0">
-                                <TextBlock Text="CHANGED FILES" Style="{StaticResource SectionHeaderTextStyle}" VerticalAlignment="Center" />
+                                <Grid>
+                                    <TextBlock Text="CHANGED FILES" Style="{StaticResource SectionHeaderTextStyle}" VerticalAlignment="Center"
+                                               Visibility="{Binding IsWorkingCopyMode, Converter={StaticResource InvBoolToVis}}" />
+                                    <Grid Visibility="{Binding IsWorkingCopyMode, Converter={StaticResource BoolToVis}}"
+                                          ColumnDefinitions="Auto,*">
+                                        <TextBlock Text="WORKING COPY" Style="{StaticResource SectionHeaderTextStyle}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1" Text="{Binding ChangedSummary}" FontSize="11" Margin="10,0,0,0"
+                                                   Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </Grid>
+                                </Grid>
                             </Border>
+
+                            <!-- working-copy status list (STATUS-001/002), grouped by section -->
+                            <ListView Grid.Row="3" x:Name="WorkingFilesList"
+                                      ItemsSource="{Binding Source={StaticResource StatusGroupsView}}"
+                                      SelectedItem="{Binding SelectedFile, Mode=OneWay}"
+                                      SelectionChanged="Files_SelectionChanged"
+                                      SelectionMode="Single" Padding="0"
+                                      ItemContainerStyle="{StaticResource FileItemStyle}"
+                                      Visibility="{Binding IsWorkingCopyMode, Converter={StaticResource BoolToVis}}">
+                                <ListView.Resources>
+                                    <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#2563EB" />
+                                    <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#1D5FD8" />
+                                    <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="#1A55C4" />
+                                    <SolidColorBrush x:Key="ListViewItemForegroundSelected" Color="#FFFFFF" />
+                                </ListView.Resources>
+                                <ListView.GroupStyle>
+                                    <GroupStyle HidesIfEmpty="True">
+                                        <GroupStyle.HeaderContainerStyle>
+                                            <Style TargetType="ListViewHeaderItem">
+                                                <Setter Property="MinHeight" Value="26" />
+                                                <Setter Property="Padding" Value="0" />
+                                                <Setter Property="Margin" Value="0" />
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            </Style>
+                                        </GroupStyle.HeaderContainerStyle>
+                                        <GroupStyle.HeaderTemplate>
+                                            <DataTemplate>
+                                                <Border Background="{ThemeResource HeaderRowBrush}" Height="24" Padding="12,0">
+                                                    <TextBlock Text="{Binding Title}" FontSize="11" FontWeight="SemiBold"
+                                                               Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                                                </Border>
+                                            </DataTemplate>
+                                        </GroupStyle.HeaderTemplate>
+                                    </GroupStyle>
+                                </ListView.GroupStyle>
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="12,0" ColumnDefinitions="18,*" DoubleTapped="WorkingFile_DoubleTapped">
+                                            <Grid.ContextFlyout>
+                                                <MenuFlyout>
+                                                    <MenuFlyoutItem Text="Open in External Editor" Click="OpenInEditor_Click" />
+                                                    <MenuFlyoutItem Text="Reveal in Explorer" Click="RevealInExplorer_Click" />
+                                                    <MenuFlyoutSeparator />
+                                                    <MenuFlyoutItem Text="Copy Path" Click="CopyFilePath_Click" />
+                                                </MenuFlyout>
+                                            </Grid.ContextFlyout>
+                                            <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}" FontSize="12"
+                                                      Glyph="{Binding Status, Converter={StaticResource StatusToGlyph}}"
+                                                      Foreground="{Binding Status, Converter={StaticResource StatusToBrush}}"
+                                                      VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="1" Margin="8,0,0,0" Text="{Binding DisplayPath}" FontSize="12.5"
+                                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
 
                             <!-- changed files list -->
                             <ListView Grid.Row="3" x:Name="FilesList" ItemsSource="{Binding PanelFiles}"
                                       SelectedItem="{Binding SelectedFile, Mode=OneWay}"
                                       SelectionChanged="Files_SelectionChanged"
                                       SelectionMode="Single" Padding="0"
-                                      ItemContainerStyle="{StaticResource FileItemStyle}">
+                                      ItemContainerStyle="{StaticResource FileItemStyle}"
+                                      Visibility="{Binding IsWorkingCopyMode, Converter={StaticResource InvBoolToVis}}">
                                 <ListView.Resources>
                                     <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#2563EB" />
                                     <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#1D5FD8" />
@@ -632,9 +710,10 @@
                             <!-- ===== BOTTOM MODE TABS (SelectorBar, docked at the bottom of the changed-files panel) ===== -->
                             <Border Grid.Row="4" Background="{ThemeResource FooterBrush}"
                                     BorderBrush="{ThemeResource DividerBrush}" BorderThickness="0,1,0,0" Padding="6,2">
-                                <SelectorBar x:Name="ModeBar" VerticalAlignment="Center">
-                                    <SelectorBarItem Text="File Status" />
-                                    <SelectorBarItem Text="Log / History" IsSelected="True" />
+                                <SelectorBar x:Name="ModeBar" VerticalAlignment="Center"
+                                             SelectionChanged="ModeBar_SelectionChanged">
+                                    <SelectorBarItem x:Name="ModeFileStatus" Text="File Status" />
+                                    <SelectorBarItem x:Name="ModeLogHistory" Text="Log / History" IsSelected="True" />
                                     <SelectorBarItem Text="Search" />
                                 </SelectorBar>
                             </Border>

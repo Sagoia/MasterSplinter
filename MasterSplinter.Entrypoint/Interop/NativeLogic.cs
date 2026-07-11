@@ -86,6 +86,15 @@ namespace MasterSplinter.Entrypoint.Interop
                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
                                                         int wsMode);
 
+        [DllImport(Dll, EntryPoint = "MsGitStatus", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitStatus([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+
+        [DllImport(Dll, EntryPoint = "MsGitWorkTreeFileDiff", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitWorkTreeFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                           [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                                                           int area,
+                                                           int wsMode);
+
         [DllImport(Dll, EntryPoint = "MsGitFileBytesAtCommit", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileBytesAtCommit([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                             [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
@@ -114,6 +123,8 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitRangeFiles(string root, string a, string b) => TakeString(MsGitRangeFiles(root, a, b));
         public static string GitRangeShortStat(string root, string a, string b) => TakeString(MsGitRangeShortStat(root, a, b));
         public static string GitRangeFileDiff(string root, string a, string b, string path, int wsMode) => TakeString(MsGitRangeFileDiff(root, a, b, path, wsMode));
+        public static string GitStatus(string root) => TakeString(MsGitStatus(root));
+        public static string GitWorkTreeFileDiff(string root, string path, int area, int wsMode) => TakeString(MsGitWorkTreeFileDiff(root, path, area, wsMode));
 
         /// <summary>Raw bytes of a file at a commit/ref (binary-safe; uses an explicit length, not strlen).</summary>
         public static byte[] GitFileBytesAtCommit(string root, string sha, string path)

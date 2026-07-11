@@ -134,7 +134,10 @@ namespace MasterSplinter.Entrypoint.Models
 
     // ---- Changed files & diff -------------------------------------------------------------------
 
-    public enum FileChangeStatus { Added, Modified, Deleted, Renamed }
+    public enum FileChangeStatus { Added, Modified, Deleted, Renamed, Untracked }
+
+    /// <summary>Which working-tree section a status entry belongs to (STATUS-002).</summary>
+    public enum WorkTreeArea { Staged, Unstaged, Untracked }
 
     /// <summary>How the diff body is laid out (DIFF-002).</summary>
     public enum DiffViewMode { Unified, SideBySide }
@@ -153,6 +156,19 @@ namespace MasterSplinter.Entrypoint.Models
         public string Path { get; set; } = "";
         public FileChangeStatus Status { get; set; }
 
+        /// <summary>Original path for a rename/copy (working-tree status only); empty otherwise.</summary>
+        public string OldPath { get; set; } = "";
+
+        /// <summary>True for a working-tree status entry (STATUS-001) — diffs come from
+        /// the worktree/index rather than a commit.</summary>
+        public bool IsWorkingTree { get; set; }
+
+        /// <summary>Which section this entry belongs to when <see cref="IsWorkingTree"/> is set.</summary>
+        public WorkTreeArea Area { get; set; }
+
+        /// <summary>Path as shown in the file list ("old → new" for renames).</summary>
+        public string DisplayPath => OldPath.Length > 0 ? $"{OldPath} → {Path}" : Path;
+
         /// <summary>Unified-diff lines (DIFF-002 unified mode).</summary>
         public ObservableCollection<DiffLine> Diff { get; } = new();
 
@@ -164,6 +180,16 @@ namespace MasterSplinter.Entrypoint.Models
 
         /// <summary>True if git reported this file as binary (DIFF-005) — no text diff is shown.</summary>
         public bool IsBinary { get; set; }
+    }
+
+    /// <summary>
+    /// One working-tree section ("Staged files (n)" etc.) for the grouped status list
+    /// (STATUS-002). The group itself is the item collection, as WinUI's grouped
+    /// CollectionViewSource expects.
+    /// </summary>
+    public sealed class ChangedFileGroup : ObservableCollection<ChangedFile>
+    {
+        public string Title { get; set; } = "";
     }
 
     public enum DiffLineKind { Context, Added, Removed, Hunk }

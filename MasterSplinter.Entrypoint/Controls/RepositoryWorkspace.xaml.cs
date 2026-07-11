@@ -1,10 +1,13 @@
 using System;
+using System.IO;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
+using MasterSplinter.Entrypoint.Git;
+using MasterSplinter.Entrypoint.Infrastructure;
 using MasterSplinter.Entrypoint.Models;
 using MasterSplinter.Entrypoint.ViewModels;
 
@@ -20,10 +23,60 @@ namespace MasterSplinter.Entrypoint.Controls
         /// <summary>Raised when a recent repository is chosen on the home screen (carries its path).</summary>
         public event EventHandler<string>? OpenRecentRequested;
 
+        // True while this view is pushing the VM's mode into the SelectorBar, so the
+        // SelectionChanged handler doesn't bounce the change back into the VM.
+        private bool _syncingModeBar;
+
         public RepositoryWorkspace()
         {
             InitializeComponent();
             DataContext = Vm;
+
+            // The grouped working-copy view: a CollectionViewSource resource can't bind to the
+            // DataContext, so its Source is wired here.
+            StatusGroupsView.Source = Vm.StatusGroups;
+
+            // Keep the bottom mode tabs in sync when the mode changes from elsewhere
+            // (sidebar "Working Copy" tap, selecting a commit, refresh).
+            Vm.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(MainViewModel.IsWorkingCopyMode))
+                    SyncModeBar();
+            };
+        }
+
+        private void SyncModeBar()
+        {
+            _syncingModeBar = true;
+            try { ModeBar.SelectedItem = Vm.IsWorkingCopyMode ? ModeFileStatus : ModeLogHistory; }
+            finally { _syncingModeBar = false; }
+        }
+
+        private async void ModeBar_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
+        {
+            if (_syncingModeBar) return;
+            if (sender.SelectedItem == ModeFileStatus)
+            {
+                await Vm.EnterWorkingCopyAsync();
+            }
+            else if (sender.SelectedItem == ModeLogHistory)
+            {
+                Vm.ExitWorkingCopy();
+            }
+            else
+            {
+                // "Search" is not a view yet — snap the selection back to the current mode.
+                SyncModeBar();
+            }
+        }
+
+        private async void Refresh_Click(object sender, RoutedEventArgs e) => await Vm.RefreshAsync();
+
+        private async void RefreshAccelerator_Invoked(KeyboardAccelerator sender,
+            KeyboardAcceleratorInvokedEventArgs args)
+        {
+            args.Handled = true;
+            await Vm.RefreshAsync(); // no-ops while a load is already running
         }
 
         private void Commits_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -176,6 +229,69 @@ namespace MasterSplinter.Entrypoint.Controls
             var data = new DataPackage();
             data.SetText(text ?? string.Empty);
             Clipboard.SetContent(data);
+        }
+
+        // ---- Working-copy file actions (STATUS-006/007) ----------------------------------------
+
+        /// <summary>Absolute on-disk path for a working-tree status entry, or null if unavailable.</summary>
+        private string? AbsolutePathOf(ChangedFile file)
+        {
+            string? root = Vm.Repository?.RootPath;
+            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(file.Path))
+                return null;
+            // GetFullPath normalizes the forward slashes git prints (rev-parse --show-toplevel);
+            // explorer.exe /select silently ignores paths containing them.
+            return Path.GetFullPath(Path.Combine(root, file.Path.Replace('/', Path.DirectorySeparatorChar)));
+        }
+
+        private async void OpenInEditor_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not ChangedFile file)
+                return;
+            await OpenWorkingFileAsync(file);
+        }
+
+        private async void WorkingFile_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is ChangedFile file)
+                await OpenWorkingFileAsync(file);
+        }
+
+        private async Task OpenWorkingFileAsync(ChangedFile file)
+        {
+            string? abs = AbsolutePathOf(file);
+            if (abs == null) return;
+            if (!File.Exists(abs))
+            {
+                await ShowMessageAsync("Open in External Editor", $"The file no longer exists on disk:\n{abs}");
+                return;
+            }
+            string? error = EditorLauncher.OpenInEditor(SettingsStore.Load().EditorCommand, abs);
+            if (error != null)
+                await ShowMessageAsync("Open in External Editor",
+                    $"Could not launch the editor: {error}\n\nCheck the editor command under Tools ▸ Options…");
+        }
+
+        private async void RevealInExplorer_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not ChangedFile file)
+                return;
+            string? abs = AbsolutePathOf(file);
+            if (abs == null) return;
+            if (!File.Exists(abs))
+            {
+                await ShowMessageAsync("Reveal in Explorer", $"The file no longer exists on disk:\n{abs}");
+                return;
+            }
+            string? error = EditorLauncher.RevealInExplorer(abs);
+            if (error != null)
+                await ShowMessageAsync("Reveal in Explorer", error);
+        }
+
+        private void CopyFilePath_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is ChangedFile file)
+                CopyToClipboard(AbsolutePathOf(file) ?? file.Path);
         }
 
         // ---- Open file at commit (LOG-007) ----------------------------------------------------

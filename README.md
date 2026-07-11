@@ -7,6 +7,7 @@ predictable and command-building lives in one place.
 
 - **Phase 1** — read-only viewer: repositories, history, branches, file changes.
 - **Phase 2** — diff viewer: unified/side-by-side, syntax highlighting, whitespace options, binary/image previews, compare commits & refs.
+- **Phase 3** — working tree: staged/unstaged/untracked status (grouped view), working-tree diffs, manual refresh (F5/Ctrl+R) + file-watcher auto-refresh, open-in-editor / reveal-in-Explorer. Still strictly read-only — nothing writes to the repo.
 
 ## Architecture
 
@@ -23,7 +24,12 @@ git.exe → C++ core (flat C ABI) → P/Invoke → C# parsing → MVVM → WinUI
 | UI | `Controls/`, `MainWindow.xaml`, `Themes/` | WinUI 3 shell, history + graph, diff panels, light/dark. |
 
 **Wire format:** delimited UTF-8 — fields `0x1F`, records `0x1E`, **NUL-free** (the marshaller stops at the
-first NUL). Raw binary (image previews) is the exception: bytes + explicit length.
+first NUL). Raw binary (image previews) is the exception: bytes + explicit length. `git status -z` output is
+NUL-separated, so the core translates each NUL to `0x1E` before returning it across the ABI.
+
+**Working-tree reads never lock the repo:** `status` and worktree `diff` run with `--no-optional-locks` —
+without it git opportunistically rewrites `.git/index`, which would re-trigger the app's own file watcher in
+an endless refresh loop.
 
 ### C++ core design
 
@@ -65,14 +71,23 @@ unit-tested in isolation.
 msbuild MasterSplinter.Entrypoint\MasterSplinter.Entrypoint.csproj -restore -t:Build -p:Configuration=Debug -p:Platform=ARM64
 ```
 
-The app needs package identity, so run the registered package, not the bare `.exe`:
+The app needs package identity, so run the registered package, not the bare `.exe`. Visual Studio's Deploy
+does this for you; from the command line, build with a runtime identifier and stage the loose layout from
+the generated recipe (a plain build does **not** produce a registrable folder — `Assets\` is missing next to
+the manifest):
 
 ```powershell
-Add-AppxPackage -Register "MasterSplinter.Entrypoint\bin\ARM64\Debug\net8.0-windows10.0.19041.0\win-arm64\AppxManifest.xml" -ForceUpdateFromAnyVersion
+msbuild MasterSplinter.Entrypoint\MasterSplinter.Entrypoint.csproj -restore -t:Build -p:Configuration=Debug -p:Platform=ARM64 -p:RuntimeIdentifier=win-arm64
+
+# Stage win-arm64\AppX\ from the build recipe (each AppxPackagedFile: Include → PackagePath), then:
+Add-AppxPackage -Register "MasterSplinter.Entrypoint\bin\ARM64\Debug\net8.0-windows10.0.19041.0\win-arm64\AppX\AppxManifest.xml" -ForceUpdateFromAnyVersion
 Start-Process "shell:AppsFolder\<PackageFamilyName>!App"
 ```
 
-> Match the build architecture to the machine. If changes don't take effect, delete `bin/` + `obj/` and rebuild.
+> Match the build architecture to the machine. If changes don't take effect, delete `bin/` + `obj/` and
+> rebuild. If registration fails with 0x80070003 and `Get-AppxPackage` shows the package with an empty
+> `InstallLocation` (its old folder was deleted), `Remove-AppxPackage` it first. For an incremental loop,
+> re-copy the recipe files into `AppX\` and just relaunch — no re-register needed.
 
 ## Testing
 

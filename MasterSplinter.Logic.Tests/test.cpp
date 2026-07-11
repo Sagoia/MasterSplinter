@@ -352,6 +352,115 @@ TEST(FileBytesAt, PreservesEmbeddedNulBytes)
     EXPECT_EQ(*result, payload);
 }
 
+// ---- Working tree status (Phase 3) ---------------------------------------------------------------
+
+TEST(Status, BuildsPorcelainArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->Status("root");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "--no-optional-locks", "-c", "core.quotePath=false",
+                     "status", "--porcelain=v1", "-z", "--untracked-files=all" }));
+}
+
+TEST(Status, TranslatesNulsToRecordSeparators)
+{
+    auto h = MakeHarness();
+    const std::string raw("M  a.txt\0?? b.txt\0", 18);
+    h.fake->SetResponse(raw, 0);
+    EXPECT_EQ(h.backend->Status("root"), "M  a.txt\x1e?? b.txt\x1e");
+}
+
+TEST(Status, RenameKeepsBothPathRecords)
+{
+    auto h = MakeHarness();
+    // -z rename record: "R  new\0orig\0" — new path first, original second.
+    const std::string raw("R  new.txt\0old.txt\0", 19);
+    h.fake->SetResponse(raw, 0);
+    EXPECT_EQ(h.backend->Status("root"), "R  new.txt\x1eold.txt\x1e");
+}
+
+TEST(Status, EmptyOnGitError)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: not a git repository", 128);
+    EXPECT_EQ(h.backend->Status("root"), "");
+}
+
+TEST(Status, EmptyRootReturnsEmptyWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Status(""), "");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+// ---- Working tree file diffs (Phase 3) -----------------------------------------------------------
+
+TEST(WorkTreeFileDiff, UnstagedArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->WorkTreeFileDiff("root", "f.cs", 0, 0);
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "--no-optional-locks", "diff", "--no-color", "--", "f.cs" }));
+}
+
+TEST(WorkTreeFileDiff, StagedAddsCached)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->WorkTreeFileDiff("root", "f.cs", 1, 0);
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "--no-optional-locks", "diff", "--cached", "--no-color",
+                     "--", "f.cs" }));
+}
+
+TEST(WorkTreeFileDiff, UntrackedUsesNoIndexAgainstDevNull)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->WorkTreeFileDiff("root", "new file.txt", 2, 0);
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "--no-optional-locks", "diff", "--no-color", "--no-index",
+                     "--", "/dev/null", "new file.txt" }));
+}
+
+TEST(WorkTreeFileDiff, WhitespaceFlags)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("", 0);
+    h.fake->AddResponse("", 0);
+    h.backend->WorkTreeFileDiff("root", "f.cs", 0, 1);
+    h.backend->WorkTreeFileDiff("root", "f.cs", 0, 2);
+    EXPECT_TRUE(h.fake->ArgsContain(0, "--ignore-space-change"));
+    EXPECT_TRUE(h.fake->ArgsContain(1, "--ignore-all-space"));
+}
+
+TEST(WorkTreeFileDiff, UntrackedReturnsOutputOnExitCode1)
+{
+    // diff --no-index exits 1 when the files differ — that is the success case here.
+    auto h = MakeHarness();
+    h.fake->SetResponse("diff --git a/dev/null b/n.txt\n+new line\n", 1);
+    EXPECT_EQ(h.backend->WorkTreeFileDiff("root", "n.txt", 2, 0),
+              "diff --git a/dev/null b/n.txt\n+new line\n");
+}
+
+TEST(WorkTreeFileDiff, EmptyPathReturnsEmptyWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->WorkTreeFileDiff("root", "", 0, 0), "");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(WorkTreeFileDiff, InvalidAreaReturnsEmptyWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->WorkTreeFileDiff("root", "f.cs", 3, 0), "");
+    EXPECT_EQ(h.backend->WorkTreeFileDiff("root", "f.cs", -1, 0), "");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
 // ---- Null runner (defensive) -------------------------------------------------------------------
 
 TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)

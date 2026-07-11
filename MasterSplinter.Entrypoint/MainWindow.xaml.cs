@@ -113,6 +113,52 @@ namespace MasterSplinter.Entrypoint
 
         private void Exit_Click(object sender, RoutedEventArgs e) => Close();
 
+        private async void Refresh_Click(object sender, RoutedEventArgs e)
+            => await Workspace.Vm.RefreshAsync();
+
+        // ---- Options dialog (STATUS-006: external editor command) ------------------------------
+
+        private async void Options_Click(object sender, RoutedEventArgs e)
+        {
+            var settings = Git.SettingsStore.Load();
+
+            var editorBox = new TextBox
+            {
+                Header = "External editor command",
+                PlaceholderText = "\"C:\\Program Files\\Editor\\editor.exe\" \"{path}\"",
+                Text = settings.EditorCommand,
+                AcceptsReturn = false,
+                MinWidth = 460,
+            };
+            var hint = new TextBlock
+            {
+                Text = "{path} is replaced with the file's full path. Leave blank to open files "
+                     + "with their default (shell-associated) application.",
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.7,
+                FontSize = 12,
+            };
+            var panel = new StackPanel { Spacing = 8 };
+            panel.Children.Add(editorBox);
+            panel.Children.Add(hint);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = RootGrid.XamlRoot,
+                Title = "Options",
+                Content = panel,
+                PrimaryButtonText = "Save",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+            {
+                settings.EditorCommand = editorBox.Text?.Trim() ?? "";
+                Git.SettingsStore.Save(settings);
+            }
+        }
+
         // ---- Open repository (CORE-001/002/003) -----------------------------------------------
 
         private async void OpenRepository_Click(object sender, RoutedEventArgs e) => await PickAndOpenAsync();
