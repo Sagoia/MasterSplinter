@@ -461,6 +461,207 @@ TEST(WorkTreeFileDiff, InvalidAreaReturnsEmptyWithoutCallingGit)
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
+// ---- Stdin contract (Phase 4) ------------------------------------------------------------------
+
+TEST(StdinContract, ReadOpsRecordNoInput)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->Status("root");
+    ASSERT_EQ(h.fake->CallCount(), 1u);
+    EXPECT_FALSE(h.fake->InputOf(0).has_value());
+}
+
+// ---- StagePaths (COMMIT-001) -------------------------------------------------------------------
+
+TEST(StagePaths, BuildsAddArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->StagePaths("root", { "a.txt" }), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "add", "-A", "--", "a.txt" }));
+    EXPECT_FALSE(h.fake->InputOf(0).has_value());
+}
+
+TEST(StagePaths, BatchesMultiplePaths)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->StagePaths("root", { "a.txt", "dir/b.txt" }), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "add", "-A", "--", "a.txt", "dir/b.txt" }));
+}
+
+TEST(StagePaths, EmptyPathsReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->StagePaths("root", {}), "ERR" + US + "No paths were provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(StagePaths, EmptyRootReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->StagePaths("", { "a.txt" }), "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(StagePaths, ErrIncludesGitOutputOnNonzeroExit)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: pathspec 'nope' did not match any files\n", 128);
+    EXPECT_EQ(h.backend->StagePaths("root", { "nope" }),
+              "ERR" + US + "fatal: pathspec 'nope' did not match any files");
+}
+
+// ---- StageAll (COMMIT-003) ---------------------------------------------------------------------
+
+TEST(StageAll, BuildsAddAllArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->StageAll("root"), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "add", "-A" }));
+}
+
+TEST(StageAll, ErrOnFailure)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("error: unable to write index\n", 1);
+    EXPECT_EQ(h.backend->StageAll("root"), "ERR" + US + "error: unable to write index");
+}
+
+// ---- UnstagePaths (COMMIT-002) -----------------------------------------------------------------
+
+TEST(UnstagePaths, ProbesHeadThenUsesRestoreStaged)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("deadbeef\n", 0); // rev-parse HEAD succeeds -> HEAD exists
+    h.fake->AddResponse("", 0);
+    EXPECT_EQ(h.backend->UnstagePaths("root", { "a.txt" }), "OK");
+    ASSERT_EQ(h.fake->CallCount(), 2u);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "rev-parse", "--verify", "--quiet", "HEAD" }));
+    EXPECT_EQ(h.fake->ArgsOf(1), (Args{ "-C", "root", "restore", "--staged", "--", "a.txt" }));
+}
+
+TEST(UnstagePaths, UsesRmCachedWhenHeadUnborn)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("", 1); // rev-parse HEAD fails -> unborn branch (fresh repo)
+    h.fake->AddResponse("", 0);
+    EXPECT_EQ(h.backend->UnstagePaths("root", { "a.txt" }), "OK");
+    ASSERT_EQ(h.fake->CallCount(), 2u);
+    EXPECT_EQ(h.fake->ArgsOf(1), (Args{ "-C", "root", "rm", "-r", "--cached", "-q", "--", "a.txt" }));
+}
+
+TEST(UnstagePaths, PassesBothPathsOfARename)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("deadbeef\n", 0);
+    h.fake->AddResponse("", 0);
+    EXPECT_EQ(h.backend->UnstagePaths("root", { "new.txt", "old.txt" }), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(1), (Args{ "-C", "root", "restore", "--staged", "--", "new.txt", "old.txt" }));
+}
+
+TEST(UnstagePaths, EmptyPathsReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->UnstagePaths("root", {}), "ERR" + US + "No paths were provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+// ---- DiscardPaths (COMMIT-004) -----------------------------------------------------------------
+
+TEST(DiscardPaths, BuildsRestoreArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->DiscardPaths("root", { "a.txt" }), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "restore", "--", "a.txt" }));
+}
+
+TEST(DiscardPaths, EmptyPathsReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->DiscardPaths("root", {}), "ERR" + US + "No paths were provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(DiscardPaths, ErrOnFailure)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("error: pathspec 'x' did not match\n", 1);
+    EXPECT_EQ(h.backend->DiscardPaths("root", { "x" }),
+              "ERR" + US + "error: pathspec 'x' did not match");
+}
+
+// ---- Commit (COMMIT-005/006/007) ---------------------------------------------------------------
+
+TEST(Commit, FeedsMessageViaStdinWithFDash)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("[master abc1234] subject\n", 0);
+    EXPECT_EQ(h.backend->Commit("root", "subject\n\nbody line 1\nbody line 2", false), "OK");
+    ASSERT_EQ(h.fake->CallCount(), 1u);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "commit", "--cleanup=strip", "-F", "-" }));
+    ASSERT_TRUE(h.fake->InputOf(0).has_value());
+    EXPECT_EQ(*h.fake->InputOf(0), "subject\n\nbody line 1\nbody line 2");
+}
+
+TEST(Commit, AmendAddsFlag)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->Commit("root", "msg", true), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "commit", "--amend", "--cleanup=strip", "-F", "-" }));
+}
+
+TEST(Commit, EmptyMessageReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Commit("root", "", false), "ERR" + US + "Commit message is empty");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Commit, WhitespaceOnlyMessageReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Commit("root", "  \t\r\n ", false), "ERR" + US + "Commit message is empty");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Commit, HookFailureMapsOutputToErr)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("commit-msg hook declined\n", 1);
+    EXPECT_EQ(h.backend->Commit("root", "msg", false), "ERR" + US + "commit-msg hook declined");
+}
+
+// ---- HeadMessage (amend pre-fill) --------------------------------------------------------------
+
+TEST(HeadMessage, BuildsLogArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("subj" + US + "body", 0);
+    h.backend->HeadMessage("root");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "log", "-1", "--pretty=format:%s%x1f%b" }));
+}
+
+TEST(HeadMessage, ParsesSubjectAndBody)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("the subject" + US + "body line 1\nbody line 2\n", 0);
+    EXPECT_EQ(h.backend->HeadMessage("root"),
+              "OK" + US + "the subject" + US + "body line 1\nbody line 2");
+}
+
+TEST(HeadMessage, ErrWhenNoCommits)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: your current branch 'master' does not have any commits yet\n", 128);
+    EXPECT_EQ(h.backend->HeadMessage("root"),
+              "ERR" + US + "fatal: your current branch 'master' does not have any commits yet");
+}
+
 // ---- Null runner (defensive) -------------------------------------------------------------------
 
 TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
@@ -469,4 +670,10 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
     EXPECT_FALSE(backend.IsRepository("root"));
     EXPECT_EQ(backend.Log("root", 0, 10), "");
     EXPECT_FALSE(backend.FileBytesAt("root", "sha", "f").has_value());
+    EXPECT_EQ(backend.StagePaths("root", { "a" }), "ERR" + US + "git add failed");
+    EXPECT_EQ(backend.StageAll("root"), "ERR" + US + "git add failed");
+    EXPECT_EQ(backend.UnstagePaths("root", { "a" }), "ERR" + US + "git unstage failed");
+    EXPECT_EQ(backend.DiscardPaths("root", { "a" }), "ERR" + US + "git restore failed");
+    EXPECT_EQ(backend.Commit("root", "msg", false), "ERR" + US + "git commit failed");
+    EXPECT_EQ(backend.HeadMessage("root"), "ERR" + US + "There is no commit yet");
 }

@@ -116,6 +116,9 @@ namespace MasterSplinter.Entrypoint
         private async void Refresh_Click(object sender, RoutedEventArgs e)
             => await Workspace.Vm.RefreshAsync();
 
+        private async void ActionsCommit_Click(object sender, RoutedEventArgs e)
+            => await Workspace.FocusCommitEditorAsync();
+
         // ---- Options dialog (STATUS-006: external editor command) ------------------------------
 
         private async void Options_Click(object sender, RoutedEventArgs e)

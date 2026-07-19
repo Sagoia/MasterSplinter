@@ -101,6 +101,33 @@ namespace MasterSplinter.Entrypoint.Interop
                                                             [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
                                                             out int len);
 
+        // ---- Staging & commit (Phase 4) — the first write operations ------------------------
+        // All return "OK" or "ERR\x1f<message>". `paths` is one or more repo-relative paths
+        // separated by 0x1E (the record separator used throughout the ABI).
+
+        [DllImport(Dll, EntryPoint = "MsGitStagePaths", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitStagePaths([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string paths);
+
+        [DllImport(Dll, EntryPoint = "MsGitStageAll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitStageAll([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+
+        [DllImport(Dll, EntryPoint = "MsGitUnstagePaths", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitUnstagePaths([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string paths);
+
+        [DllImport(Dll, EntryPoint = "MsGitDiscardPaths", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitDiscardPaths([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string paths);
+
+        [DllImport(Dll, EntryPoint = "MsGitCommit", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitCommit([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                 [MarshalAs(UnmanagedType.LPUTF8Str)] string message,
+                                                 [MarshalAs(UnmanagedType.I1)] bool amend);
+
+        [DllImport(Dll, EntryPoint = "MsGitHeadMessage", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitHeadMessage([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+
         [DllImport(Dll, EntryPoint = "MsGitFree", CallingConvention = CallingConvention.Cdecl)]
         private static extern void MsGitFree(IntPtr ptr);
 
@@ -125,6 +152,12 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitRangeFileDiff(string root, string a, string b, string path, int wsMode) => TakeString(MsGitRangeFileDiff(root, a, b, path, wsMode));
         public static string GitStatus(string root) => TakeString(MsGitStatus(root));
         public static string GitWorkTreeFileDiff(string root, string path, int area, int wsMode) => TakeString(MsGitWorkTreeFileDiff(root, path, area, wsMode));
+        public static string GitStagePaths(string root, string paths) => TakeString(MsGitStagePaths(root, paths));
+        public static string GitStageAll(string root) => TakeString(MsGitStageAll(root));
+        public static string GitUnstagePaths(string root, string paths) => TakeString(MsGitUnstagePaths(root, paths));
+        public static string GitDiscardPaths(string root, string paths) => TakeString(MsGitDiscardPaths(root, paths));
+        public static string GitCommit(string root, string message, bool amend) => TakeString(MsGitCommit(root, message, amend));
+        public static string GitHeadMessage(string root) => TakeString(MsGitHeadMessage(root));
 
         /// <summary>Raw bytes of a file at a commit/ref (binary-safe; uses an explicit length, not strlen).</summary>
         public static byte[] GitFileBytesAtCommit(string root, string sha, string path)

@@ -16,8 +16,10 @@
 #include <winrt/base.h>
 #include <wil/resource.h>
 
+#include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace ms
@@ -63,8 +65,12 @@ namespace ms
     // Launch `executable` with the given args, capturing stdout (and stderr, merged) as UTF-8.
     // Returns false only if the process could not be started; otherwise exitCode holds the child's
     // status. The executable is resolved via PATH (lpApplicationName = nullptr).
+    // When `input` is set, its bytes are fed to the child's stdin (then closed for EOF) from a
+    // writer thread that runs concurrently with the stdout drain — sequential write-then-read
+    // deadlocks as soon as either pipe buffer fills.
     bool WindowsProcessRunner::Run(const std::string& executable,
                                    const std::vector<std::string>& args,
+                                   const std::optional<std::string>& input,
                                    std::string& out,
                                    int& exitCode) const
     {
@@ -75,7 +81,7 @@ namespace ms
         {
             SECURITY_ATTRIBUTES sa{};
             sa.nLength = sizeof(sa);
-            sa.bInheritHandle = TRUE; // the write end + NUL stdin must be inheritable by the child
+            sa.bInheritHandle = TRUE; // the child's std handles must be inheritable
 
             // Pipe: the child writes stdout+stderr into writePipe; we read from readPipe.
             wil::unique_handle readPipe, writePipe;
@@ -83,11 +89,24 @@ namespace ms
                 return false;
             SetHandleInformation(readPipe.get(), HANDLE_FLAG_INHERIT, 0); // our read end stays private
 
-            // Give the child a NUL stdin so it can never block waiting on input (git reads none here).
-            wil::unique_hfile nulIn(CreateFileW(L"NUL", GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr));
-            if (!nulIn)
-                return false;
+            // stdin: a pipe when the caller supplies input, otherwise NUL so the child can
+            // never block waiting on input.
+            wil::unique_handle stdinRead, stdinWrite;
+            wil::unique_hfile nulIn;
+            if (input.has_value())
+            {
+                if (!CreatePipe(stdinRead.put(), stdinWrite.put(), &sa, 0))
+                    return false;
+                SetHandleInformation(stdinWrite.get(), HANDLE_FLAG_INHERIT, 0); // our write end stays private
+            }
+            else
+            {
+                nulIn.reset(CreateFileW(L"NUL", GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr));
+                if (!nulIn)
+                    return false;
+            }
+            HANDLE childStdin = input.has_value() ? stdinRead.get() : static_cast<HANDLE>(nulIn.get());
 
             // Command line: UTF-8 -> UTF-16 via C++/WinRT, then Win32-quoted.
             std::wstring cmd;
@@ -98,14 +117,14 @@ namespace ms
             cmdBuf.push_back(L'\0'); // CreateProcessW needs a writable buffer
 
             // Restrict inheritance to exactly these two handles.
-            HANDLE inheritList[2] = { writePipe.get(), nulIn.get() };
+            HANDLE inheritList[2] = { writePipe.get(), childStdin };
 
             STARTUPINFOEXW six{};
             six.StartupInfo.cb = sizeof(six);
             six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
             six.StartupInfo.hStdOutput = writePipe.get();
             six.StartupInfo.hStdError = writePipe.get();
-            six.StartupInfo.hStdInput = nulIn.get();
+            six.StartupInfo.hStdInput = childStdin;
 
             SIZE_T attrSize = 0;
             InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize); // query required size
@@ -128,12 +147,33 @@ namespace ms
             wil::unique_handle childProcess(rawPi.hProcess);
             wil::unique_handle childThread(rawPi.hThread);
 
-            writePipe.reset(); // drop our write end so ReadFile sees EOF when the child exits
+            writePipe.reset();  // drop our write end so ReadFile sees EOF when the child exits
+            stdinRead.reset();  // drop our copy of the child's stdin read end
+
+            // Feed stdin on a separate thread while this thread drains stdout, then close the
+            // write end so the child sees EOF (what `commit -F -` waits for). A write failure
+            // (child exited early -> broken pipe) just ends the loop; the exit code tells the story.
+            std::thread writer;
+            if (input.has_value())
+            {
+                writer = std::thread([&input, stdinWrite = std::move(stdinWrite)]() mutable {
+                    size_t off = 0;
+                    DWORD written = 0;
+                    while (off < input->size() &&
+                           WriteFile(stdinWrite.get(), input->data() + off,
+                                     static_cast<DWORD>(input->size() - off), &written, nullptr))
+                        off += written;
+                    stdinWrite.reset(); // EOF for the child
+                });
+            }
 
             char buf[4096];
             DWORD read = 0;
             while (ReadFile(readPipe.get(), buf, sizeof(buf), &read, nullptr) && read > 0)
                 out.append(buf, read);
+
+            if (writer.joinable())
+                writer.join();
 
             WaitForSingleObject(childProcess.get(), INFINITE);
             DWORD code = 0;

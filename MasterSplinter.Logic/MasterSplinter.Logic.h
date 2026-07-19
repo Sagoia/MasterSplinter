@@ -98,6 +98,34 @@ extern "C" {
 	MASTERSPLINTERLOGIC_API char* MsGitFileBytesAtCommit(const char* root, const char* sha,
 	                                                     const char* path, int* outLen);
 
+	// ---- Staging & commit (Phase 4) — the first WRITE operations -------------------------------
+	// All return "OK" on success or "ERR\x1f<message>" on failure (git's merged stdout+stderr,
+	// trailing newlines trimmed). `paths` arguments hold one or more repo-relative paths
+	// separated by 0x1E.
+
+	// git add -A -- <paths...> : stages modifications, deletions, and untracked files alike.
+	MASTERSPLINTERLOGIC_API char* MsGitStagePaths(const char* root, const char* paths);
+
+	// git add -A : stages every change the status view shows.
+	MASTERSPLINTERLOGIC_API char* MsGitStageAll(const char* root);
+
+	// git restore --staged -- <paths...> (or git rm -r --cached -q on an unborn branch, i.e. a
+	// fresh repo with no commits). For a staged rename pass BOTH the new and the old path.
+	MASTERSPLINTERLOGIC_API char* MsGitUnstagePaths(const char* root, const char* paths);
+
+	// git restore -- <paths...> : restores unstaged changes from the index. Tracked files only —
+	// deleting an untracked file is the caller's job (it is a plain filesystem delete).
+	MASTERSPLINTERLOGIC_API char* MsGitDiscardPaths(const char* root, const char* paths);
+
+	// git commit [--amend] --cleanup=strip -F - with `message` (full UTF-8 commit message,
+	// subject + blank line + body) fed via stdin. Empty/whitespace-only message returns ERR
+	// without invoking git.
+	MASTERSPLINTERLOGIC_API char* MsGitCommit(const char* root, const char* message, bool amend);
+
+	// "OK\x1f<subject>\x1f<body>" for the HEAD commit (amend pre-fill), or "ERR\x1f<message>"
+	// (e.g. no commits yet).
+	MASTERSPLINTERLOGIC_API char* MsGitHeadMessage(const char* root);
+
 	// Frees any char* returned by the MsGit* functions above.
 	MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr);
 }

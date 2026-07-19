@@ -60,7 +60,15 @@ namespace MasterSplinter.Entrypoint.ViewModels
         public bool HasRepository => Repository != null;
 
         private bool _isLoading;
-        public bool IsLoading { get => _isLoading; private set => Set(ref _isLoading, value); }
+        public bool IsLoading
+        {
+            get => _isLoading;
+            private set
+            {
+                if (Set(ref _isLoading, value))
+                    Raise(nameof(CanCommit));
+            }
+        }
 
         private string? _errorMessage;
         public string? ErrorMessage
@@ -382,6 +390,9 @@ namespace MasterSplinter.Entrypoint.ViewModels
                     ? "Working tree clean"
                     : $"{st.Staged.Count} staged  ·  {st.Unstaged.Count} unstaged  ·  {st.Untracked.Count} untracked";
 
+                _hasStaged = st.Staged.Count > 0;
+                Raise(nameof(CanCommit));
+
                 ChangedFile? restore = StatusGroups.SelectMany(g => g)
                         .FirstOrDefault(f => prevArea != null && f.Area == prevArea && f.Path == prevPath)
                     ?? StatusGroups.SelectMany(g => g).FirstOrDefault();
@@ -397,6 +408,183 @@ namespace MasterSplinter.Entrypoint.ViewModels
             var group = new ChangedFileGroup { Title = $"{title} ({files.Count})" };
             foreach (var f in files) group.Add(f);
             StatusGroups.Add(group);
+        }
+
+        // ---- Staging & commit (COMMIT-001..007) --------------------------------------------------
+
+        // In-app mutations write .git\index, which the watcher reports as repoDirty ~500ms later;
+        // inside this window that event is downgraded to a status reload (see OnRepositoryChanged).
+        private long _suppressRepoRefreshUntil;
+        private bool _hasStaged;
+
+        private string _commitSubject = "";
+        public string CommitSubject
+        {
+            get => _commitSubject;
+            set { if (Set(ref _commitSubject, value)) Raise(nameof(CanCommit)); }
+        }
+
+        private string _commitBody = "";
+        public string CommitBody { get => _commitBody; set => Set(ref _commitBody, value); }
+
+        private bool _isAmend;
+        public bool IsAmend
+        {
+            get => _isAmend;
+            set
+            {
+                if (!Set(ref _isAmend, value)) return;
+                Raise(nameof(CanCommit));
+                if (value)
+                    _ = PrefillAmendMessageAsync();
+            }
+        }
+
+        private bool _isCommitting;
+        public bool IsCommitting
+        {
+            get => _isCommitting;
+            private set { if (Set(ref _isCommitting, value)) Raise(nameof(CanCommit)); }
+        }
+
+        /// <summary>COMMIT-005: committing is blocked while the subject is empty or there is
+        /// nothing to commit (no staged files, unless amending).</summary>
+        public bool CanCommit => !IsCommitting && !IsLoading
+                                 && !string.IsNullOrWhiteSpace(CommitSubject)
+                                 && (_hasStaged || IsAmend);
+
+        public Task StageFileAsync(ChangedFile file)
+            => RunStatusMutationAsync(r => r.StagePaths(PathsOf(file)));
+
+        public Task UnstageFileAsync(ChangedFile file)
+            => RunStatusMutationAsync(r => r.UnstagePaths(PathsOf(file)));
+
+        public Task StageAllAsync()
+            => RunStatusMutationAsync(r => r.StageAll());
+
+        /// <summary>Unstages every staged row (git has no single verb for this in our restricted
+        /// unborn-branch-safe form, so all staged paths are passed in one batch).</summary>
+        public Task UnstageAllAsync()
+        {
+            var paths = StatusGroups.SelectMany(g => g)
+                .Where(f => f.Area == WorkTreeArea.Staged)
+                .SelectMany(PathsOf)
+                .Distinct()
+                .ToList();
+            return paths.Count == 0
+                ? Task.CompletedTask
+                : RunStatusMutationAsync(r => r.UnstagePaths(paths));
+        }
+
+        /// <summary>Double-click on a working-copy row: staged rows unstage, all others stage.</summary>
+        public Task ToggleStageAsync(ChangedFile file)
+            => file.Area == WorkTreeArea.Staged ? UnstageFileAsync(file) : StageFileAsync(file);
+
+        /// <summary>COMMIT-004. Tracked: restore from the index. Untracked: delete from disk —
+        /// the caller must have shown the deletion-worded confirmation first.</summary>
+        public Task DiscardFileAsync(ChangedFile file)
+        {
+            if (file.Area == WorkTreeArea.Untracked)
+            {
+                return RunStatusMutationAsync(r =>
+                {
+                    try
+                    {
+                        File.Delete(Path.Combine(r.RootPath, file.Path));
+                        return null;
+                    }
+                    catch (Exception ex) { return ex.Message; }
+                });
+            }
+            return RunStatusMutationAsync(r => r.DiscardPaths(new[] { file.Path }));
+        }
+
+        /// <summary>COMMIT-006/007. Returns true when the commit was created; on failure the
+        /// editor text is preserved and the git output surfaces in the error bar.</summary>
+        public async Task<bool> CommitAsync()
+        {
+            if (_repo == null || !CanCommit) return false;
+            GitRepository repo = _repo;
+            bool amend = IsAmend;
+
+            string subject = CommitSubject.TrimEnd();
+            string message = string.IsNullOrWhiteSpace(CommitBody)
+                ? subject
+                : subject + "\n\n" + CommitBody;
+
+            IsCommitting = true;
+            try
+            {
+                string? error = await Task.Run(() => repo.Commit(message, amend));
+                if (error != null)
+                {
+                    ErrorMessage = error;
+                    return false;
+                }
+                CommitSubject = "";
+                CommitBody = "";
+                IsAmend = false;
+                await RefreshAsync(); // the new commit appears in the log; watcher echo is absorbed by IsLoading
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorMessage = ex.Message;
+                return false;
+            }
+            finally { IsCommitting = false; }
+        }
+
+        /// <summary>HEAD's subject/body (amend pre-fill + confirmation), or null with no commits.</summary>
+        public async Task<(string Subject, string Body)?> GetHeadMessageAsync()
+        {
+            if (_repo == null) return null;
+            GitRepository repo = _repo;
+            try { return await Task.Run(() => repo.HeadMessage()); }
+            catch { return null; }
+        }
+
+        private async Task PrefillAmendMessageAsync()
+        {
+            // Pre-fill only into an empty editor, so checking the box never clobbers typed text.
+            if (!string.IsNullOrWhiteSpace(CommitSubject) || !string.IsNullOrWhiteSpace(CommitBody))
+                return;
+            var head = await GetHeadMessageAsync();
+            if (head == null)
+            {
+                ErrorMessage = "There is no commit to amend.";
+                IsAmend = false;
+                return;
+            }
+            if (!IsAmend) return; // unchecked again while the message loaded
+            CommitSubject = head.Value.Subject;
+            CommitBody = head.Value.Body;
+        }
+
+        /// <summary>Shared plumbing for stage/unstage/discard: arm the watcher-suppression window,
+        /// run the mutation off-thread, surface any error, and reload the status list explicitly
+        /// (never wait for the watcher's debounce).</summary>
+        private async Task RunStatusMutationAsync(Func<GitRepository, string?> operation)
+        {
+            if (_repo == null) return;
+            GitRepository repo = _repo;
+            _suppressRepoRefreshUntil = Environment.TickCount64 + 2000;
+            try
+            {
+                string? error = await Task.Run(() => operation(repo));
+                if (error != null)
+                    ErrorMessage = error;
+                await LoadStatusAsync();
+            }
+            catch (Exception ex) { ErrorMessage = ex.Message; }
+        }
+
+        private static IEnumerable<string> PathsOf(ChangedFile file)
+        {
+            yield return file.Path;
+            // A staged rename occupies two index entries; unstaging needs both pathspecs.
+            if (!string.IsNullOrEmpty(file.OldPath))
+                yield return file.OldPath;
         }
 
         // ---- Binary / image diff (DIFF-005) ----------------------------------------------------
@@ -597,7 +785,19 @@ namespace MasterSplinter.Entrypoint.ViewModels
         {
             if (_repo == null || IsLoading) return;
             if (repoDirty)
+            {
+                // Inside the suppression window the .git\index write was our own stage/unstage/
+                // discard: the log did not change, so a status reload is enough (a full refresh
+                // here would flicker the log after every stage). External changes — the window
+                // is only armed by in-app mutations — still trigger the full refresh.
+                if (Environment.TickCount64 < _suppressRepoRefreshUntil)
+                {
+                    if (IsWorkingCopyMode)
+                        _ = LoadStatusAsync();
+                    return;
+                }
                 _ = RefreshAsync();          // commit/checkout/stage happened outside the app
+            }
             else if (IsWorkingCopyMode)
                 _ = LoadStatusAsync();       // plain file edits only affect the status view
             // Otherwise nothing: entering the working-copy view always loads a fresh status.
@@ -616,6 +816,10 @@ namespace MasterSplinter.Entrypoint.ViewModels
             ClearCompareState();
             IsWorkingCopyMode = false;
             StatusGroups.Clear();
+            CommitSubject = "";
+            CommitBody = "";
+            IsAmend = false;
+            _hasStaged = false;
             _markedCommit = null;
             Raise(nameof(HasMarkedCommit));
             PanelFiles.Clear();

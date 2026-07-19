@@ -19,6 +19,7 @@
 
 #include "MacProcessRunner.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@ namespace ms
 {
     bool MacProcessRunner::Run(const std::string& executable,
                                const std::vector<std::string>& args,
+                               const std::optional<std::string>& input,
                                std::string& out,
                                int& exitCode) const
     {
@@ -46,16 +48,42 @@ namespace ms
                 [argv addObject:[NSString stringWithUTF8String:a.c_str()]];
             task.arguments = argv;
 
-            // Merge stdout + stderr into one pipe (same contract as the Windows runner); NUL stdin.
+            // Merge stdout + stderr into one pipe (same contract as the Windows runner).
             NSPipe* pipe = [NSPipe pipe];
             task.standardOutput = pipe;
             task.standardError = pipe;
-            task.standardInput = [NSFileHandle fileHandleWithNullDevice];
+
+            // stdin: a pipe fed with `input` when supplied, otherwise the null device so the
+            // child can never block waiting on input.
+            NSPipe* stdinPipe = nil;
+            if (input.has_value())
+            {
+                stdinPipe = [NSPipe pipe];
+                task.standardInput = stdinPipe;
+            }
+            else
+            {
+                task.standardInput = [NSFileHandle fileHandleWithNullDevice];
+            }
 
             // Modern, non-throwing launch (macOS 10.13+): NO on failure instead of an NSException.
             NSError* error = nil;
             if (![task launchAndReturnError:&error])
                 return false; // the process could not be started (e.g. env/git missing)
+
+            // Write stdin off-thread while this thread drains stdout — writing and reading
+            // sequentially on one thread deadlocks once either pipe buffer fills. Closing the
+            // write end gives the child EOF (what `commit -F -` waits for).
+            if (stdinPipe != nil)
+            {
+                NSData* stdinData = [NSData dataWithBytes:input->data() length:input->size()];
+                NSFileHandle* stdinHandle = [stdinPipe fileHandleForWriting];
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    @try { [stdinHandle writeData:stdinData]; }
+                    @catch (NSException*) { /* child exited early — exit code tells the story */ }
+                    [stdinHandle closeFile];
+                });
+            }
 
             // Drain the pipe to EOF *before* waiting, so a large diff can't fill the ~64K pipe
             // buffer and deadlock the child. readDataToEndOfFile returns when git closes the pipe.

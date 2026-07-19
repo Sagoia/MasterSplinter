@@ -313,7 +313,7 @@
 
         <!-- ===================== ERROR BAR (CORE-001) ===================== -->
         <InfoBar Grid.Row="0" Severity="Error" IsOpen="{Binding HasError, Mode=OneWay}"
-                 Title="Could not open repository" Message="{Binding ErrorMessage}"
+                 Title="Git error" Message="{Binding ErrorMessage}"
                  CloseButtonClick="ErrorBar_CloseClick" />
 
         <!-- ===================== COMMAND TOOLBAR ===================== -->
@@ -326,7 +326,7 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <ctl:ToolButton Glyph="&#xE73E;" Label="Commit" />
+                    <ctl:ToolButton Glyph="&#xE73E;" Label="Commit" Click="CommitToolbar_Click" />
                     <ctl:ToolButton Glyph="&#xE898;" Label="Push" />
                     <ctl:ToolButton Glyph="&#xE896;" Label="Pull" />
                     <ctl:ToolButton Glyph="&#xE895;" Label="Fetch" />
@@ -532,6 +532,8 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
                                 <RowDefinition Height="Auto" />
+                                <!-- commit editor (working-copy mode only) -->
+                                <RowDefinition Height="Auto" />
                                 <!-- bottom mode tabs (inside the changed-files panel) -->
                             </Grid.RowDefinitions>
 
@@ -610,11 +612,17 @@
                                     <TextBlock Text="CHANGED FILES" Style="{StaticResource SectionHeaderTextStyle}" VerticalAlignment="Center"
                                                Visibility="{Binding IsWorkingCopyMode, Converter={StaticResource InvBoolToVis}}" />
                                     <Grid Visibility="{Binding IsWorkingCopyMode, Converter={StaticResource BoolToVis}}"
-                                          ColumnDefinitions="Auto,*">
+                                          ColumnDefinitions="Auto,*,Auto,Auto">
                                         <TextBlock Text="WORKING COPY" Style="{StaticResource SectionHeaderTextStyle}" VerticalAlignment="Center" />
                                         <TextBlock Grid.Column="1" Text="{Binding ChangedSummary}" FontSize="11" Margin="10,0,0,0"
                                                    Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center"
                                                    TextTrimming="CharacterEllipsis" />
+                                        <Button Grid.Column="2" Content="Stage All" Style="{StaticResource GhostButtonStyle}"
+                                                FontSize="11" Padding="8,1" Margin="4,0,0,0" VerticalAlignment="Center"
+                                                Click="StageAll_Click" />
+                                        <Button Grid.Column="3" Content="Unstage All" Style="{StaticResource GhostButtonStyle}"
+                                                FontSize="11" Padding="8,1" Margin="4,0,0,0" VerticalAlignment="Center"
+                                                Click="UnstageAll_Click" />
                                     </Grid>
                                 </Grid>
                             </Border>
@@ -657,7 +665,11 @@
                                     <DataTemplate>
                                         <Grid Padding="12,0" ColumnDefinitions="18,*" DoubleTapped="WorkingFile_DoubleTapped">
                                             <Grid.ContextFlyout>
-                                                <MenuFlyout>
+                                                <MenuFlyout Opening="WorkingFileMenu_Opening">
+                                                    <MenuFlyoutItem Tag="stage" Text="Stage File" Click="StageFile_Click" />
+                                                    <MenuFlyoutItem Tag="unstage" Text="Unstage File" Click="UnstageFile_Click" />
+                                                    <MenuFlyoutItem Tag="discard" Text="Discard Changes…" Click="DiscardFile_Click" />
+                                                    <MenuFlyoutSeparator />
                                                     <MenuFlyoutItem Text="Open in External Editor" Click="OpenInEditor_Click" />
                                                     <MenuFlyoutItem Text="Reveal in Explorer" Click="RevealInExplorer_Click" />
                                                     <MenuFlyoutSeparator />
@@ -707,8 +719,31 @@
                                 </ListView.ItemTemplate>
                             </ListView>
 
+                            <!-- ===== COMMIT EDITOR (COMMIT-005/006/007) ===== -->
+                            <Border Grid.Row="4" Padding="10,8" Background="{ThemeResource ToolAreaBrush}"
+                                    BorderBrush="{ThemeResource DividerBrush}" BorderThickness="0,1,0,0"
+                                    Visibility="{Binding IsWorkingCopyMode, Converter={StaticResource BoolToVis}}">
+                                <Grid RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
+                                    <TextBox x:Name="CommitSubjectBox" PlaceholderText="Commit summary (required)"
+                                             FontSize="12.5"
+                                             Text="{Binding CommitSubject, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <TextBox Grid.Row="1" PlaceholderText="Description (optional)"
+                                             AcceptsReturn="True" TextWrapping="Wrap" FontSize="12.5"
+                                             MinHeight="48" MaxHeight="120"
+                                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                             Text="{Binding CommitBody, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Grid Grid.Row="2" ColumnDefinitions="Auto,*,Auto">
+                                        <CheckBox Content="Amend last commit" MinWidth="0" FontSize="12.5"
+                                                  IsChecked="{Binding IsAmend, Mode=TwoWay}" />
+                                        <Button Grid.Column="2" Content="Commit" Style="{StaticResource AccentButtonStyle}"
+                                                MinWidth="90" IsEnabled="{Binding CanCommit, Mode=OneWay}"
+                                                Click="Commit_Click" />
+                                    </Grid>
+                                </Grid>
+                            </Border>
+
                             <!-- ===== BOTTOM MODE TABS (SelectorBar, docked at the bottom of the changed-files panel) ===== -->
-                            <Border Grid.Row="4" Background="{ThemeResource FooterBrush}"
+                            <Border Grid.Row="5" Background="{ThemeResource FooterBrush}"
                                     BorderBrush="{ThemeResource DividerBrush}" BorderThickness="0,1,0,0" Padding="6,2">
                                 <SelectorBar x:Name="ModeBar" VerticalAlignment="Center"
                                              SelectionChanged="ModeBar_SelectionChanged">

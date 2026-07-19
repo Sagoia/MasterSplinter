@@ -10,9 +10,10 @@ using MasterSplinter.Entrypoint.Models;
 namespace MasterSplinter.Entrypoint.Git
 {
     /// <summary>
-    /// A read-only view of one git repository. Owns parsing of the delimited UTF-8 streams the
-    /// native core (<see cref="NativeLogic"/>) produces by shelling out to git.exe. All methods
-    /// here are synchronous and may be slow; callers should invoke them off the UI thread.
+    /// A view of one git repository: reads (log, refs, diffs, status) plus the Phase 4 staging
+    /// and commit mutations. Owns parsing of the delimited UTF-8 streams the native core
+    /// (<see cref="NativeLogic"/>) produces by shelling out to git.exe. All methods here are
+    /// synchronous and may be slow; callers should invoke them off the UI thread.
     /// </summary>
     public sealed class GitRepository
     {
@@ -300,6 +301,50 @@ namespace MasterSplinter.Entrypoint.Git
                 }
             }
             return new WorkTreeStatus(staged, unstaged, untracked);
+        }
+
+        // ---- Staging & commit (Phase 4, COMMIT-001..007) ---------------------------------------
+        // Each mutation returns null on success, or the git error text for the InfoBar.
+
+        public string? StagePaths(IEnumerable<string> paths)
+            => ParseOkErr(NativeLogic.GitStagePaths(RootPath, JoinPaths(paths)));
+
+        public string? StageAll()
+            => ParseOkErr(NativeLogic.GitStageAll(RootPath));
+
+        /// <summary>For a staged rename include BOTH the new and the old path.</summary>
+        public string? UnstagePaths(IEnumerable<string> paths)
+            => ParseOkErr(NativeLogic.GitUnstagePaths(RootPath, JoinPaths(paths)));
+
+        /// <summary>Restores unstaged changes from the index (tracked files only — deleting an
+        /// untracked file is a plain filesystem delete, handled by the caller).</summary>
+        public string? DiscardPaths(IEnumerable<string> paths)
+            => ParseOkErr(NativeLogic.GitDiscardPaths(RootPath, JoinPaths(paths)));
+
+        public string? Commit(string message, bool amend)
+            => ParseOkErr(NativeLogic.GitCommit(RootPath, message, amend));
+
+        /// <summary>Subject and body of the HEAD commit (amend pre-fill), or null if there is no
+        /// commit yet.</summary>
+        public (string Subject, string Body)? HeadMessage()
+        {
+            string[] parts = NativeLogic.GitHeadMessage(RootPath).Split(US);
+            if (parts.Length < 2 || parts[0] != "OK")
+                return null;
+            return (parts[1], parts.Length >= 3 ? parts[2] : "");
+        }
+
+        private static string JoinPaths(IEnumerable<string> paths) => string.Join(RS, paths);
+
+        // "OK" -> null; "ERR<US>message" -> message; anything else -> a generic failure.
+        private static string? ParseOkErr(string raw)
+        {
+            string[] parts = raw.Split(US, 2);
+            if (parts[0] == "OK")
+                return null;
+            return parts.Length >= 2 && parts[1].Length > 0
+                ? parts[1]
+                : "The git operation failed (is git installed and on PATH?).";
         }
 
         // ---- Diff summary stats (DIFF-001) -----------------------------------------------------

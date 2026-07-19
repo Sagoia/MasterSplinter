@@ -6,6 +6,7 @@
 // built — so tests can assert the command, and (b) returns SCRIPTED (out, exitCode) responses so
 // tests can feed "what git would have printed" without any process or repository.
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,7 @@ namespace mstest
         {
             std::string executable;
             std::vector<std::string> args;
+            std::optional<std::string> input; // stdin payload, nullopt for the no-stdin overload
         };
 
         struct Response
@@ -50,12 +52,15 @@ namespace mstest
             responses.push_back({ std::move(out), exitCode });
         }
 
+        using ms::IProcessRunner::Run; // keep the 4-arg convenience overload visible
+
         bool Run(const std::string& executable,
                  const std::vector<std::string>& args,
+                 const std::optional<std::string>& input,
                  std::string& out,
                  int& exitCode) const override
         {
-            calls.push_back({ executable, args });
+            calls.push_back({ executable, args, input });
 
             if (!processStarts)
             {
@@ -81,6 +86,7 @@ namespace mstest
         // ---- Small assertion helpers used by the tests ----
         size_t CallCount() const { return calls.size(); }
         const std::vector<std::string>& ArgsOf(size_t callIndex) const { return calls.at(callIndex).args; }
+        const std::optional<std::string>& InputOf(size_t callIndex) const { return calls.at(callIndex).input; }
 
         // True if `flag` appears anywhere in call `callIndex`'s argv.
         bool ArgsContain(size_t callIndex, const std::string& flag) const

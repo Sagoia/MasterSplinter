@@ -13,8 +13,11 @@ namespace ms
     class WindowsProcessRunner final : public IProcessRunner
     {
     public:
+        using IProcessRunner::Run; // keep the 4-arg convenience overload visible
+
         bool Run(const std::string& executable,
                  const std::vector<std::string>& args,
+                 const std::optional<std::string>& input,
                  std::string& out,
                  int& exitCode) const override;
     };

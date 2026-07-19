@@ -18,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -40,6 +41,25 @@ namespace
 
     // Null-safe conversion of an inbound C string to std::string (nullptr -> empty).
     std::string Str(const char* p) { return p ? std::string(p) : std::string(); }
+
+    // Split an inbound 0x1E-separated path list into the vector the backend takes. Empty
+    // segments are dropped, so a trailing separator is harmless.
+    std::vector<std::string> SplitPaths(const char* paths)
+    {
+        std::vector<std::string> result;
+        std::string s = Str(paths);
+        size_t start = 0;
+        while (start <= s.size())
+        {
+            size_t end = s.find('\x1e', start);
+            if (end == std::string::npos)
+                end = s.size();
+            if (end > start)
+                result.emplace_back(s, start, end - start);
+            start = end + 1;
+        }
+        return result;
+    }
 
     // Heap copy the caller frees via MsGitFree (allocated inside this DLL, freed inside it).
     // memcpy (not strcpy) so embedded NULs survive for the binary byte payloads.
@@ -153,6 +173,38 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileBytesAtCommit(const char* root
     if (p && outLen)
         *outLen = static_cast<int>(bytes->size());
     return p;
+}
+
+// ---- Staging & commit (Phase 4) ----------------------------------------------------------
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStagePaths(const char* root, const char* paths)
+{
+    return DupString(Backend().StagePaths(Str(root), SplitPaths(paths)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStageAll(const char* root)
+{
+    return DupString(Backend().StageAll(Str(root)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitUnstagePaths(const char* root, const char* paths)
+{
+    return DupString(Backend().UnstagePaths(Str(root), SplitPaths(paths)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitDiscardPaths(const char* root, const char* paths)
+{
+    return DupString(Backend().DiscardPaths(Str(root), SplitPaths(paths)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommit(const char* root, const char* message, bool amend)
+{
+    return DupString(Backend().Commit(Str(root), Str(message), amend));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitHeadMessage(const char* root)
+{
+    return DupString(Backend().HeadMessage(Str(root)));
 }
 
 extern "C" MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr)

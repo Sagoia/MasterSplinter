@@ -85,7 +85,7 @@
                     <MenuFlyoutItem Text="Git Flow…" />
                 </MenuBarItem>
                 <MenuBarItem Title="Actions">
-                    <MenuFlyoutItem Text="Commit…" />
+                    <MenuFlyoutItem Text="Commit…" Click="ActionsCommit_Click" />
                     <MenuFlyoutItem Text="Push…" />
                     <MenuFlyoutItem Text="Pull…" />
                     <MenuFlyoutItem Text="Fetch…" />

@@ -33,10 +33,16 @@ namespace ms
 
     std::string GitBackend::RunGitC(const std::string& root, std::vector<std::string> args, int& code) const
     {
+        return RunGitC(root, std::move(args), std::nullopt, code);
+    }
+
+    std::string GitBackend::RunGitC(const std::string& root, std::vector<std::string> args,
+                                    const std::optional<std::string>& input, int& code) const
+    {
         std::vector<std::string> full = { "-C", root };
         full.insert(full.end(), args.begin(), args.end());
         std::string out;
-        if (!runner_ || !runner_->Run("git", full, out, code))
+        if (!runner_ || !runner_->Run("git", full, input, out, code))
         {
             code = -1;
             out.clear();
@@ -284,5 +290,125 @@ namespace ms
         if (code != 0)
             return std::nullopt;
         return out;
+    }
+
+    // ---- Write operations (Phase 4, COMMIT-001..007) -------------------------------------------
+    // NOTE: no --no-optional-locks here — that flag suppresses *opportunistic* index writes on
+    // read commands; these commands write the index/HEAD on purpose, and the app's file watcher
+    // reacting to that is the desired refresh signal.
+
+    namespace
+    {
+        std::string Err(std::string message)
+        {
+            return std::string("ERR") + US + std::move(message);
+        }
+
+        // Map a finished git command to the "OK" / "ERR<US>message" contract.
+        std::string OkOrErr(std::string out, int code, const char* fallback)
+        {
+            if (code == 0)
+                return "OK";
+            TrimTrailingNewlines(out);
+            return Err(out.empty() ? std::string(fallback) : std::move(out));
+        }
+
+        bool IsBlank(const std::string& s)
+        {
+            return s.find_first_not_of(" \t\r\n") == std::string::npos;
+        }
+    }
+
+    std::string GitBackend::StagePaths(const std::string& root, const std::vector<std::string>& paths) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (paths.empty())
+            return Err("No paths were provided");
+        // -A scoped by pathspec stages modifications, deletions, and untracked files alike, so
+        // one command covers every row type the status view shows.
+        std::vector<std::string> args = { "add", "-A", "--" };
+        args.insert(args.end(), paths.begin(), paths.end());
+        int code;
+        std::string out = RunGitC(root, args, code);
+        return OkOrErr(std::move(out), code, "git add failed");
+    }
+
+    std::string GitBackend::StageAll(const std::string& root) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        int code;
+        std::string out = RunGitC(root, { "add", "-A" }, code);
+        return OkOrErr(std::move(out), code, "git add failed");
+    }
+
+    std::string GitBackend::UnstagePaths(const std::string& root, const std::vector<std::string>& paths) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (paths.empty())
+            return Err("No paths were provided");
+        // `restore --staged` resolves HEAD, which does not exist yet in a freshly-init'd repo
+        // (unborn branch) — there, dropping the index entries via `rm --cached` is the equivalent.
+        int probeCode;
+        RunGitC(root, { "rev-parse", "--verify", "--quiet", "HEAD" }, probeCode);
+        std::vector<std::string> args = probeCode == 0
+            ? std::vector<std::string>{ "restore", "--staged", "--" }
+            : std::vector<std::string>{ "rm", "-r", "--cached", "-q", "--" };
+        args.insert(args.end(), paths.begin(), paths.end());
+        int code;
+        std::string out = RunGitC(root, args, code);
+        return OkOrErr(std::move(out), code, "git unstage failed");
+    }
+
+    std::string GitBackend::DiscardPaths(const std::string& root, const std::vector<std::string>& paths) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (paths.empty())
+            return Err("No paths were provided");
+        // Restore from the index (the default source), so staged content is never touched and
+        // this works on an unborn branch too.
+        std::vector<std::string> args = { "restore", "--" };
+        args.insert(args.end(), paths.begin(), paths.end());
+        int code;
+        std::string out = RunGitC(root, args, code);
+        return OkOrErr(std::move(out), code, "git restore failed");
+    }
+
+    std::string GitBackend::Commit(const std::string& root, const std::string& message, bool amend) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(message))
+            return Err("Commit message is empty");
+        // The message travels via stdin (`-F -`): immune to command-line length limits and
+        // quoting edge cases. --cleanup=strip pins message post-processing regardless of the
+        // user's commit.cleanup config, so Subject+blank+Body round-trips predictably.
+        std::vector<std::string> args = { "commit" };
+        if (amend)
+            args.push_back("--amend");
+        args.push_back("--cleanup=strip");
+        args.push_back("-F");
+        args.push_back("-");
+        int code;
+        std::string out = RunGitC(root, args, message, code);
+        return OkOrErr(std::move(out), code, "git commit failed");
+    }
+
+    std::string GitBackend::HeadMessage(const std::string& root) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        int code;
+        std::string out = RunGitC(root, { "log", "-1", "--pretty=format:%s%x1f%b" }, code);
+        if (code != 0)
+        {
+            TrimTrailingNewlines(out);
+            return Err(out.empty() ? std::string("There is no commit yet") : std::move(out));
+        }
+        TrimTrailingNewlines(out);
+        return std::string("OK") + US + out; // OK US subject US body
     }
 }

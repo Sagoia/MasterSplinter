@@ -51,10 +51,27 @@ namespace ms
         std::optional<std::string> FileBytesAt(const std::string& root, const std::string& sha,
                                                const std::string& path) const;
 
+        // ---- Write operations (Phase 4, COMMIT-001..007) ----
+        // All return "OK" on success or "ERR" US <message> on failure (git's merged output,
+        // trailing newlines trimmed). Empty root/paths/message short-circuit to ERR without
+        // spawning git.
+        std::string StagePaths(const std::string& root, const std::vector<std::string>& paths) const;
+        std::string StageAll(const std::string& root) const;
+        std::string UnstagePaths(const std::string& root, const std::vector<std::string>& paths) const;
+        std::string DiscardPaths(const std::string& root, const std::vector<std::string>& paths) const;
+        std::string Commit(const std::string& root, const std::string& message, bool amend) const;
+
+        // "OK" US <subject> US <body> for the HEAD commit (amend pre-fill), or ERR (e.g. no
+        // commits yet).
+        std::string HeadMessage(const std::string& root) const;
+
     private:
         // Run `git -C <root> <args...>`, returning the merged stdout/stderr. `code` receives git's
-        // exit status (or -1 if the process could not be started).
+        // exit status (or -1 if the process could not be started). The `input` overload feeds the
+        // child's stdin (e.g. `commit -F -`).
         std::string RunGitC(const std::string& root, std::vector<std::string> args, int& code) const;
+        std::string RunGitC(const std::string& root, std::vector<std::string> args,
+                            const std::optional<std::string>& input, int& code) const;
 
         std::unique_ptr<IProcessRunner> runner_;
     };

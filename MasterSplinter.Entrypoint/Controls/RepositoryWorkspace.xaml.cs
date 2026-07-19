@@ -251,10 +251,12 @@ namespace MasterSplinter.Entrypoint.Controls
             await OpenWorkingFileAsync(file);
         }
 
+        // Phase 4: double-click toggles stage/unstage (SourceTree behavior); opening the file in
+        // the external editor stays available on the context menu.
         private async void WorkingFile_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
         {
             if (sender is FrameworkElement fe && fe.DataContext is ChangedFile file)
-                await OpenWorkingFileAsync(file);
+                await Vm.ToggleStageAsync(file);
         }
 
         private async Task OpenWorkingFileAsync(ChangedFile file)
@@ -293,6 +295,112 @@ namespace MasterSplinter.Entrypoint.Controls
             if (sender is FrameworkElement fe && fe.DataContext is ChangedFile file)
                 CopyToClipboard(AbsolutePathOf(file) ?? file.Path);
         }
+
+        // ---- Staging & commit (COMMIT-001..007) -----------------------------------------------
+
+        private async void StageFile_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is ChangedFile file)
+                await Vm.StageFileAsync(file);
+        }
+
+        private async void UnstageFile_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is ChangedFile file)
+                await Vm.UnstageFileAsync(file);
+        }
+
+        private async void StageAll_Click(object sender, RoutedEventArgs e) => await Vm.StageAllAsync();
+
+        private async void UnstageAll_Click(object sender, RoutedEventArgs e) => await Vm.UnstageAllAsync();
+
+        // One shared context menu for every working-copy row; which of the stage/unstage/discard
+        // items apply depends on the row's area, so visibility is set as the flyout opens.
+        private void WorkingFileMenu_Opening(object sender, object e)
+        {
+            if (sender is not MenuFlyout menu || menu.Target is not FrameworkElement target
+                || target.DataContext is not ChangedFile file)
+                return;
+
+            foreach (var item in menu.Items)
+            {
+                if (item is not MenuFlyoutItem mi || mi.Tag is not string tag)
+                    continue;
+                bool visible = tag switch
+                {
+                    "stage" => file.Area != WorkTreeArea.Staged,
+                    "unstage" => file.Area == WorkTreeArea.Staged,
+                    "discard" => file.Area != WorkTreeArea.Staged,
+                    _ => true,
+                };
+                mi.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            }
+        }
+
+        private async void DiscardFile_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not ChangedFile file)
+                return;
+
+            // COMMIT-004: destructive, so always confirm — with distinct wording for untracked
+            // files, where "discard" means deleting the file from disk.
+            bool untracked = file.Area == WorkTreeArea.Untracked;
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = untracked ? "Delete untracked file" : "Discard changes",
+                Content = new TextBlock
+                {
+                    Text = untracked
+                        ? $"{file.Path} is not tracked by git. Discarding will permanently delete the file from disk."
+                        : $"Discard changes to {file.Path}? This cannot be undone.",
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                PrimaryButtonText = untracked ? "Delete" : "Discard",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                await Vm.DiscardFileAsync(file);
+        }
+
+        private async void Commit_Click(object sender, RoutedEventArgs e)
+        {
+            // COMMIT-007: amending rewrites history, so confirm and name the commit being replaced.
+            if (Vm.IsAmend)
+            {
+                var head = await Vm.GetHeadMessageAsync();
+                string current = head?.Subject is { Length: > 0 } subject
+                    ? $"\n\nCurrent commit: “{subject}”"
+                    : "";
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = XamlRoot,
+                    Title = "Amend last commit",
+                    Content = new TextBlock
+                    {
+                        Text = "Amend the last commit? This rewrites history — do not amend commits that are already pushed." + current,
+                        TextWrapping = TextWrapping.Wrap,
+                    },
+                    PrimaryButtonText = "Amend",
+                    CloseButtonText = "Cancel",
+                    DefaultButton = ContentDialogButton.Close,
+                };
+                if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                    return;
+            }
+            await Vm.CommitAsync();
+        }
+
+        /// <summary>Toolbar Commit / Actions ▸ Commit…: open the working copy and focus the editor.</summary>
+        public async Task FocusCommitEditorAsync()
+        {
+            await Vm.EnterWorkingCopyAsync();
+            CommitSubjectBox.Focus(FocusState.Programmatic);
+        }
+
+        private async void CommitToolbar_Click(object sender, RoutedEventArgs e)
+            => await FocusCommitEditorAsync();
 
         // ---- Open file at commit (LOG-007) ----------------------------------------------------
 
