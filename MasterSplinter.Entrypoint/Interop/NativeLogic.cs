@@ -47,8 +47,8 @@ namespace MasterSplinter.Entrypoint.Interop
         [DllImport(Dll, EntryPoint = "MsGitLog", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root, int order, int maxCount);
 
-        [DllImport(Dll, EntryPoint = "MsGitRefs", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr MsGitRefs([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+        [DllImport(Dll, EntryPoint = "MsGitRefDetails", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRefDetails([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
 
         [DllImport(Dll, EntryPoint = "MsGitCommitFiles", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitCommitFiles([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -128,6 +128,45 @@ namespace MasterSplinter.Entrypoint.Interop
         [DllImport(Dll, EntryPoint = "MsGitHeadMessage", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitHeadMessage([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
 
+        // ---- Branches & tags (Phase 5) ------------------------------------------------------
+        // Same "OK" / "ERR\x1f<message>" contract as the Phase 4 writes.
+
+        [DllImport(Dll, EntryPoint = "MsGitCheckout", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitCheckout([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                   [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+                                                   [MarshalAs(UnmanagedType.I1)] bool detach);
+
+        [DllImport(Dll, EntryPoint = "MsGitCreateBranch", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitCreateBranch([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string startPoint,
+                                                       [MarshalAs(UnmanagedType.I1)] bool checkout);
+
+        [DllImport(Dll, EntryPoint = "MsGitDeleteBranch", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitDeleteBranch([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+                                                       [MarshalAs(UnmanagedType.I1)] bool force);
+
+        [DllImport(Dll, EntryPoint = "MsGitRenameBranch", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRenameBranch([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string oldName,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string newName);
+
+        [DllImport(Dll, EntryPoint = "MsGitCreateTag", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitCreateTag([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string commitish,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string message);
+
+        [DllImport(Dll, EntryPoint = "MsGitDeleteTag", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitDeleteTag([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
+        [DllImport(Dll, EntryPoint = "MsGitAheadBehind", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitAheadBehind([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                      [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
+                                                      [MarshalAs(UnmanagedType.LPUTF8Str)] string b);
+
         [DllImport(Dll, EntryPoint = "MsGitFree", CallingConvention = CallingConvention.Cdecl)]
         private static extern void MsGitFree(IntPtr ptr);
 
@@ -142,7 +181,7 @@ namespace MasterSplinter.Entrypoint.Interop
 
         public static string GitOpenRepository(string path) => TakeString(MsGitOpenRepository(path));
         public static string GitLog(string root, int order, int maxCount) => TakeString(MsGitLog(root, order, maxCount));
-        public static string GitRefs(string root) => TakeString(MsGitRefs(root));
+        public static string GitRefDetails(string root) => TakeString(MsGitRefDetails(root));
         public static string GitCommitFiles(string root, string sha) => TakeString(MsGitCommitFiles(root, sha));
         public static string GitCommitShortStat(string root, string sha) => TakeString(MsGitCommitShortStat(root, sha));
         public static string GitFileDiff(string root, string sha, string path, int wsMode) => TakeString(MsGitFileDiff(root, sha, path, wsMode));
@@ -158,6 +197,13 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitDiscardPaths(string root, string paths) => TakeString(MsGitDiscardPaths(root, paths));
         public static string GitCommit(string root, string message, bool amend) => TakeString(MsGitCommit(root, message, amend));
         public static string GitHeadMessage(string root) => TakeString(MsGitHeadMessage(root));
+        public static string GitCheckout(string root, string refName, bool detach) => TakeString(MsGitCheckout(root, refName, detach));
+        public static string GitCreateBranch(string root, string name, string startPoint, bool checkout) => TakeString(MsGitCreateBranch(root, name, startPoint, checkout));
+        public static string GitDeleteBranch(string root, string name, bool force) => TakeString(MsGitDeleteBranch(root, name, force));
+        public static string GitRenameBranch(string root, string oldName, string newName) => TakeString(MsGitRenameBranch(root, oldName, newName));
+        public static string GitCreateTag(string root, string name, string commitish, string message) => TakeString(MsGitCreateTag(root, name, commitish, message));
+        public static string GitDeleteTag(string root, string name) => TakeString(MsGitDeleteTag(root, name));
+        public static string GitAheadBehind(string root, string a, string b) => TakeString(MsGitAheadBehind(root, a, b));
 
         /// <summary>Raw bytes of a file at a commit/ref (binary-safe; uses an explicit length, not strlen).</summary>
         public static byte[] GitFileBytesAtCommit(string root, string sha, string path)

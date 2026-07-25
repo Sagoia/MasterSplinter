@@ -48,8 +48,19 @@ extern "C" {
 	// order: 0=date, 1=topo, 2=reverse-date, 3=author-date. maxCount<=0 means no limit.
 	MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount);
 
-	// Newline-free list of full ref names (refs/heads, refs/tags, refs/remotes), 0x1E-separated.
-	MASTERSPLINTERLOGIC_API char* MsGitRefs(const char* root);
+	// One record per ref (records separated by 0x1E, fields by 0x1F) covering refs/heads,
+	// refs/tags and refs/remotes in refname order. Always exactly 8 fields, several of which are
+	// routinely empty — the field COUNT is what makes positional parsing safe:
+	//   0 refname      full ref name ("refs/heads/main")
+	//   1 objectname   SHA the ref points at (the TAG OBJECT for an annotated tag)
+	//   2 peeled       commit an annotated tag points at; empty for everything else
+	//   3 objecttype   "commit" | "tag"  ("tag" => annotated tag)
+	//   4 upstream     short upstream name ("origin/main"); empty when there is none
+	//   5 track        "ahead 2, behind 1" | "ahead 2" | "behind 1" | "gone" | "" (in sync)
+	//   6 head         "*" for the checked-out branch, otherwise a single space
+	//   7 symref       non-empty only for symbolic refs (e.g. refs/remotes/origin/HEAD)
+	// Empty string on error. NOTE: for-each-ref uses "%xx" hex escapes, NOT log's "%xNN".
+	MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root);
 
 	// Tab-separated git name-status for one commit: "<status>\t<path>[\t<newPath>]" per line.
 	MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha);
@@ -125,6 +136,42 @@ extern "C" {
 	// "OK\x1f<subject>\x1f<body>" for the HEAD commit (amend pre-fill), or "ERR\x1f<message>"
 	// (e.g. no commits yet).
 	MASTERSPLINTERLOGIC_API char* MsGitHeadMessage(const char* root);
+
+	// ---- Branches & tags (Phase 5) -------------------------------------------------------------
+	// Same "OK" / "ERR\x1f<message>" contract as the Phase 4 writes. Ref names are NOT validated
+	// here: git's own check-ref-format produces a better message than we could, and it reaches
+	// the UI verbatim through the ERR channel.
+
+	// git switch <refName>, or git switch --detach <refName> for a commit. Deliberately NOT
+	// forced — git carries uncommitted changes across when it safely can and refuses otherwise,
+	// and that refusal is the message the caller shows.
+	MASTERSPLINTERLOGIC_API char* MsGitCheckout(const char* root, const char* refName, bool detach);
+
+	// checkout ? "git switch -c <name> [<startPoint>]" : "git branch <name> [<startPoint>]".
+	// Empty startPoint means HEAD. Never forced, so an existing name fails loudly.
+	MASTERSPLINTERLOGIC_API char* MsGitCreateBranch(const char* root, const char* name,
+	                                                const char* startPoint, bool checkout);
+
+	// git branch -d (safe) / -D (force). Callers must try force=false first and only offer
+	// force=true after showing git's refusal.
+	MASTERSPLINTERLOGIC_API char* MsGitDeleteBranch(const char* root, const char* name, bool force);
+
+	// git branch -m <oldName> <newName> — works on the current branch, never clobbers.
+	MASTERSPLINTERLOGIC_API char* MsGitRenameBranch(const char* root, const char* oldName,
+	                                                const char* newName);
+
+	// Blank message => lightweight "git tag <name> [<commitish>]"; otherwise annotated
+	// "git tag -a -F - <name> [<commitish>]" with the message fed via stdin. Empty commitish
+	// means HEAD.
+	MASTERSPLINTERLOGIC_API char* MsGitCreateTag(const char* root, const char* name,
+	                                             const char* commitish, const char* message);
+
+	// git tag -d <name> (local only).
+	MASTERSPLINTERLOGIC_API char* MsGitDeleteTag(const char* root, const char* name);
+
+	// "<onlyInA>\t<onlyInB>" from git rev-list --left-right --count a...b; empty on error.
+	// This is a READ op: it decorates the compare banner rather than acting.
+	MASTERSPLINTERLOGIC_API char* MsGitAheadBehind(const char* root, const char* a, const char* b);
 
 	// Frees any char* returned by the MsGit* functions above.
 	MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr);

@@ -31,7 +31,7 @@ namespace ms
         bool IsRepository(const std::string& path) const;
         std::string OpenRepository(const std::string& path) const;
         std::string Log(const std::string& root, int order, int maxCount) const;
-        std::string Refs(const std::string& root) const;
+        std::string RefDetails(const std::string& root) const;
         std::string CommitFiles(const std::string& root, const std::string& sha) const;
         std::string CommitShortStat(const std::string& root, const std::string& sha) const;
         std::string FileDiff(const std::string& root, const std::string& sha,
@@ -64,6 +64,26 @@ namespace ms
         // "OK" US <subject> US <body> for the HEAD commit (amend pre-fill), or ERR (e.g. no
         // commits yet).
         std::string HeadMessage(const std::string& root) const;
+
+        // ---- Branches & tags (Phase 5, BR-001..007 / TAG-001..003) ----
+        // Same "OK" / "ERR" US <message> contract as the Phase 4 writes; empty root or blank
+        // names short-circuit to ERR without spawning git. Ref-name validity is deliberately
+        // NOT pre-checked here — git's own check-ref-format produces a better message than we
+        // could, and it reaches the UI verbatim through the ERR channel.
+        std::string Checkout(const std::string& root, const std::string& refName, bool detach) const;
+        std::string CreateBranch(const std::string& root, const std::string& name,
+                                 const std::string& startPoint, bool checkout) const;
+        std::string DeleteBranch(const std::string& root, const std::string& name, bool force) const;
+        std::string RenameBranch(const std::string& root, const std::string& oldName,
+                                 const std::string& newName) const;
+        // Blank message => lightweight tag; otherwise annotated, message fed via stdin.
+        std::string CreateTag(const std::string& root, const std::string& name,
+                              const std::string& commitish, const std::string& message) const;
+        std::string DeleteTag(const std::string& root, const std::string& name) const;
+
+        // Read op (empty on failure): "<onlyInA>\t<onlyInB>" for the symmetric difference a...b.
+        std::string AheadBehind(const std::string& root, const std::string& a,
+                                const std::string& b) const;
 
     private:
         // Run `git -C <root> <args...>`, returning the merged stdout/stderr. `code` receives git's

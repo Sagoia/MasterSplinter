@@ -163,27 +163,72 @@ namespace MasterSplinter.Entrypoint.Git
 
         // ---- Refs (sidebar) --------------------------------------------------------------------
 
-        public sealed record Refs(List<string> Branches, List<string> Tags, List<string> Remotes);
+        public sealed record RefList(List<BranchInfo> Branches, List<TagInfo> Tags,
+                                     List<RemoteBranchInfo> Remotes);
 
-        public Refs ListRefs()
+        // "ahead 2, behind 1" from %(upstream:track,nobracket). Anything unrecognized leaves the
+        // counts at 0 — a branch then simply shows no arrows, never a wrong number.
+        private static readonly Regex AheadRe = new(@"ahead (\d+)", RegexOptions.Compiled);
+        private static readonly Regex BehindRe = new(@"behind (\d+)", RegexOptions.Compiled);
+
+        /// <summary>Local branches, tags and remote-tracking branches in one pass (BR-001, BR-002,
+        /// TAG-001). See MasterSplinter.Logic.h for the 8-field record layout.</summary>
+        public RefList ListRefs()
         {
-            string raw = NativeLogic.GitRefs(RootPath);
-            var branches = new List<string>();
-            var tags = new List<string>();
-            var remotes = new List<string>();
-            foreach (string rec in raw.Split('\n'))
+            string raw = NativeLogic.GitRefDetails(RootPath);
+            var branches = new List<BranchInfo>();
+            var tags = new List<TagInfo>();
+            var remotes = new List<RemoteBranchInfo>();
+
+            foreach (string rec in raw.Split(RS))
             {
-                string r = rec.Trim('\n', '\r', ' ');
+                // git writes a newline after each record's RS terminator.
+                string r = rec.Trim('\n', '\r');
                 if (r.Length == 0)
                     continue;
-                if (r.StartsWith("refs/heads/", StringComparison.Ordinal))
-                    branches.Add(r["refs/heads/".Length..]);
-                else if (r.StartsWith("refs/tags/", StringComparison.Ordinal))
-                    tags.Add(r["refs/tags/".Length..]);
-                else if (r.StartsWith("refs/remotes/", StringComparison.Ordinal))
-                    remotes.Add(r["refs/remotes/".Length..]);
+                string[] f = r.Split(US);
+                if (f.Length < 8)
+                    continue;
+
+                string refName = f[0];
+                if (refName.StartsWith("refs/heads/", StringComparison.Ordinal))
+                {
+                    string track = f[5];
+                    branches.Add(new BranchInfo(
+                        refName,
+                        refName["refs/heads/".Length..],
+                        f[1],
+                        f[4],
+                        MatchInt(AheadRe, track),
+                        MatchInt(BehindRe, track),
+                        track == "gone",
+                        f[6].Trim() == "*"));
+                }
+                else if (refName.StartsWith("refs/tags/", StringComparison.Ordinal))
+                {
+                    // %(objectname) is the tag OBJECT for an annotated tag; %(*objectname) peels
+                    // it to the commit, which is what compare/checkout need.
+                    tags.Add(new TagInfo(
+                        refName,
+                        refName["refs/tags/".Length..],
+                        f[2].Length > 0 ? f[2] : f[1],
+                        f[3] == "tag"));
+                }
+                else if (refName.StartsWith("refs/remotes/", StringComparison.Ordinal))
+                {
+                    // Skip symbolic refs: refs/remotes/origin/HEAD is an alias for another branch
+                    // and would otherwise render as a phantom "HEAD" leaf under the remote.
+                    if (f[7].Length > 0)
+                        continue;
+                    string shortName = refName["refs/remotes/".Length..];
+                    int slash = shortName.IndexOf('/');
+                    if (slash < 0)
+                        continue;
+                    remotes.Add(new RemoteBranchInfo(refName, shortName[..slash],
+                                                     shortName[(slash + 1)..], f[1]));
+                }
             }
-            return new Refs(branches, tags, remotes);
+            return new RefList(branches, tags, remotes);
         }
 
         // ---- Changed files (single commit or a..b range) ---------------------------------------
@@ -322,7 +367,13 @@ namespace MasterSplinter.Entrypoint.Git
             => ParseOkErr(NativeLogic.GitDiscardPaths(RootPath, JoinPaths(paths)));
 
         public string? Commit(string message, bool amend)
-            => ParseOkErr(NativeLogic.GitCommit(RootPath, message, amend));
+            => ParseOkErr(NativeLogic.GitCommit(RootPath, NormalizeMessage(message), amend));
+
+        /// <summary>Multi-line WinUI TextBoxes report their line breaks as a bare CR, which git
+        /// would store verbatim — a two-line message would come back as one line with an embedded
+        /// control character. Every message headed for git goes through here.</summary>
+        private static string NormalizeMessage(string message)
+            => message.Replace("\r\n", "\n").Replace('\r', '\n');
 
         /// <summary>Subject and body of the HEAD commit (amend pre-fill), or null if there is no
         /// commit yet.</summary>
@@ -332,6 +383,48 @@ namespace MasterSplinter.Entrypoint.Git
             if (parts.Length < 2 || parts[0] != "OK")
                 return null;
             return (parts[1], parts.Length >= 3 ? parts[2] : "");
+        }
+
+        // ---- Branches & tags (Phase 5, BR-001..007 / TAG-001..003) -----------------------------
+        // Each mutation returns null on success, or the git error text for the InfoBar.
+
+        /// <summary>BR-003. Not forced: git carries uncommitted changes across when it safely can
+        /// and refuses otherwise, and that refusal is what the caller shows.</summary>
+        public string? Checkout(string refName, bool detach)
+            => ParseOkErr(NativeLogic.GitCheckout(RootPath, refName, detach));
+
+        /// <summary>BR-004. Empty <paramref name="startPoint"/> means HEAD.</summary>
+        public string? CreateBranch(string name, string startPoint, bool checkout)
+            => ParseOkErr(NativeLogic.GitCreateBranch(RootPath, name, startPoint, checkout));
+
+        /// <summary>BR-005. Callers must try force=false first, so an unmerged branch can only go
+        /// after git has refused once and the user has confirmed again.</summary>
+        public string? DeleteBranch(string name, bool force)
+            => ParseOkErr(NativeLogic.GitDeleteBranch(RootPath, name, force));
+
+        /// <summary>BR-006. Works on the current branch too.</summary>
+        public string? RenameBranch(string oldName, string newName)
+            => ParseOkErr(NativeLogic.GitRenameBranch(RootPath, oldName, newName));
+
+        /// <summary>TAG-002. Blank message = lightweight tag; otherwise annotated. Empty
+        /// <paramref name="commitish"/> means HEAD.</summary>
+        public string? CreateTag(string name, string commitish, string message)
+            => ParseOkErr(NativeLogic.GitCreateTag(RootPath, name, commitish, NormalizeMessage(message)));
+
+        /// <summary>TAG-003.</summary>
+        public string? DeleteTag(string name)
+            => ParseOkErr(NativeLogic.GitDeleteTag(RootPath, name));
+
+        /// <summary>BR-007. Commits in <paramref name="b"/> but not <paramref name="a"/> (Ahead)
+        /// and vice versa (Behind). (0, 0) when git failed or the output was unexpected.</summary>
+        public (int Ahead, int Behind) AheadBehind(string a, string b)
+        {
+            // "<onlyInA>\t<onlyInB>" — left is what a has that b lacks, i.e. how far b is behind.
+            string[] parts = NativeLogic.GitAheadBehind(RootPath, a, b)
+                .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || !int.TryParse(parts[0], out int left) || !int.TryParse(parts[1], out int right))
+                return (0, 0);
+            return (right, left);
         }
 
         private static string JoinPaths(IEnumerable<string> paths) => string.Join(RS, paths);

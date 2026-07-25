@@ -236,7 +236,20 @@
                     Background="{Binding IsSelected, Converter={StaticResource SelToBg}}"
                     Visibility="{Binding IsVisible, Converter={StaticResource BoolToVis}}">
                 <Grid Margin="{Binding Level, Converter={StaticResource LevelToMargin}}"
-                      ColumnDefinitions="14,18,*" VerticalAlignment="Center">
+                      ColumnDefinitions="14,18,*,Auto,Auto" VerticalAlignment="Center"
+                      DoubleTapped="SidebarLeaf_DoubleTapped">
+                    <Grid.ContextFlyout>
+                        <MenuFlyout Opening="SidebarMenu_Opening">
+                            <MenuFlyoutItem Tag="checkout" Text="Checkout" Click="SidebarCheckout_Click" />
+                            <MenuFlyoutItem Tag="checkoutlocal" Text="Check Out as Local Branch…" Click="SidebarCheckoutLocal_Click" />
+                            <MenuFlyoutItem Tag="newfrom" Text="Create Branch from Here…" Click="SidebarCreateBranch_Click" />
+                            <MenuFlyoutItem Tag="rename" Text="Rename…" Click="SidebarRenameBranch_Click" />
+                            <MenuFlyoutSeparator Tag="sep" />
+                            <MenuFlyoutItem Tag="deletebranch" Text="Delete Branch…" Click="SidebarDeleteBranch_Click" />
+                            <MenuFlyoutItem Tag="deletetag" Text="Delete Tag…" Click="SidebarDeleteTag_Click" />
+                            <MenuFlyoutItem Tag="copyname" Text="Copy Ref Name" Click="SidebarCopyRefName_Click" />
+                        </MenuFlyout>
+                    </Grid.ContextFlyout>
                     <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}" FontSize="9"
                               Glyph="{Binding IsExpanded, Converter={StaticResource ExpToChevron}}"
                               Foreground="{ThemeResource TextMutedBrush}" VerticalAlignment="Center"
@@ -250,8 +263,16 @@
                                         Visibility="{Binding Kind, Converter={StaticResource KindToBranchVis}}" />
                     </Grid>
                     <TextBlock Grid.Column="2" Margin="6,0,0,0" Text="{Binding Text}" VerticalAlignment="Center" FontSize="13"
-                               FontWeight="{Binding IsSelected, Converter={StaticResource SelToWeight}}"
+                               FontWeight="{Binding IsEmphasized, Converter={StaticResource SelToWeight}}"
                                Foreground="{ThemeResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                    <!-- BR-001: upstream divergence (↑ahead ↓behind) and the checked-out marker. -->
+                    <TextBlock Grid.Column="3" Margin="6,0,0,0" Text="{Binding TrackText}" VerticalAlignment="Center"
+                               FontSize="11" Foreground="{ThemeResource TextMutedBrush}"
+                               Visibility="{Binding HasTrack, Converter={StaticResource BoolToVis}}" />
+                    <FontIcon Grid.Column="4" FontFamily="{ThemeResource SymbolThemeFontFamily}" Glyph="&#xE73E;"
+                              FontSize="10" Margin="6,0,4,0" VerticalAlignment="Center"
+                              Foreground="{ThemeResource BadgeHeadFg}"
+                              Visibility="{Binding IsCurrent, Converter={StaticResource BoolToVis}}" />
                 </Grid>
             </Border>
         </DataTemplate>
@@ -331,11 +352,11 @@
                     <ctl:ToolButton Glyph="&#xE896;" Label="Pull" />
                     <ctl:ToolButton Glyph="&#xE895;" Label="Fetch" />
                     <Rectangle Width="1" Height="38" Fill="{ThemeResource DividerBrush}" Margin="6,0" />
-                    <ctl:ToolButton Vector="branch" Label="Branch" />
+                    <ctl:ToolButton Vector="branch" Label="Branch" Click="BranchToolbar_Click" />
                     <ctl:ToolButton Vector="merge" Label="Merge" IsEnabled="False" />
                     <ctl:ToolButton Vector="stash" Label="Stash" />
                     <ctl:ToolButton Glyph="&#xE7A7;" Label="Discard" IsEnabled="False" />
-                    <ctl:ToolButton Glyph="&#xE8EC;" Label="Tag" />
+                    <ctl:ToolButton Glyph="&#xE8EC;" Label="Tag" Click="TagToolbar_Click" />
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -472,6 +493,10 @@
                                             <MenuFlyoutSeparator />
                                             <MenuFlyoutItem Text="Mark for Comparison" Click="MarkForComparison_Click" />
                                             <MenuFlyoutItem Text="Compare with Marked Commit" Click="CompareWithMarked_Click" />
+                                            <MenuFlyoutSeparator />
+                                            <MenuFlyoutItem Text="Create Branch Here…" Click="CreateBranchHere_Click" />
+                                            <MenuFlyoutItem Text="Create Tag Here…" Click="CreateTagHere_Click" />
+                                            <MenuFlyoutItem Text="Checkout Commit…" Click="CheckoutCommit_Click" />
                                         </MenuFlyout>
                                     </Grid.ContextFlyout>
                                     <Grid.ColumnDefinitions>
@@ -548,6 +573,10 @@
                                         <TextBlock Text="Comparing" FontSize="11" Foreground="{ThemeResource TextSecondaryBrush}" />
                                         <TextBlock Text="{Binding CompareTitle}" FontFamily="Consolas" FontSize="12.5"
                                                    Foreground="{ThemeResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                                        <!-- BR-007: divergence between the two refs -->
+                                        <TextBlock Text="{Binding CompareAheadBehind}" FontSize="11"
+                                                   Foreground="{ThemeResource TextSecondaryBrush}"
+                                                   Visibility="{Binding HasCompareAheadBehind, Converter={StaticResource BoolToVis}}" />
                                     </StackPanel>
                                     <Button Grid.Column="2" Content="Exit" Click="ExitCompare_Click"
                                             Style="{StaticResource GhostButtonStyle}" VerticalAlignment="Center" />

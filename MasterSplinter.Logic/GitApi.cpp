@@ -105,9 +105,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, i
     return DupString(Backend().Log(Str(root), order, maxCount));
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefs(const char* root)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root)
 {
-    return DupString(Backend().Refs(Str(root)));
+    return DupString(Backend().RefDetails(Str(root)));
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha)
@@ -205,6 +205,46 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommit(const char* root, const cha
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitHeadMessage(const char* root)
 {
     return DupString(Backend().HeadMessage(Str(root)));
+}
+
+// ---- Branches & tags (Phase 5) ------------------------------------------------------------
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCheckout(const char* root, const char* refName, bool detach)
+{
+    return DupString(Backend().Checkout(Str(root), Str(refName), detach));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCreateBranch(const char* root, const char* name,
+                                                           const char* startPoint, bool checkout)
+{
+    return DupString(Backend().CreateBranch(Str(root), Str(name), Str(startPoint), checkout));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitDeleteBranch(const char* root, const char* name, bool force)
+{
+    return DupString(Backend().DeleteBranch(Str(root), Str(name), force));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRenameBranch(const char* root, const char* oldName,
+                                                           const char* newName)
+{
+    return DupString(Backend().RenameBranch(Str(root), Str(oldName), Str(newName)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCreateTag(const char* root, const char* name,
+                                                        const char* commitish, const char* message)
+{
+    return DupString(Backend().CreateTag(Str(root), Str(name), Str(commitish), Str(message)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitDeleteTag(const char* root, const char* name)
+{
+    return DupString(Backend().DeleteTag(Str(root), Str(name)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitAheadBehind(const char* root, const char* a, const char* b)
+{
+    return DupString(Backend().AheadBehind(Str(root), Str(a), Str(b)));
 }
 
 extern "C" MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr)

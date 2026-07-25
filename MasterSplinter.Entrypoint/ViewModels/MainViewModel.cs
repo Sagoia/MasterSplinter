@@ -235,6 +235,15 @@ namespace MasterSplinter.Entrypoint.ViewModels
         private string _compareTitle = "";
         public string CompareTitle { get => _compareTitle; private set => Set(ref _compareTitle, value); }
 
+        /// <summary>BR-007: "↑N ahead · ↓M behind" for the compared refs; empty when identical.</summary>
+        private string _compareAheadBehind = "";
+        public string CompareAheadBehind
+        {
+            get => _compareAheadBehind;
+            private set { if (Set(ref _compareAheadBehind, value)) Raise(nameof(HasCompareAheadBehind)); }
+        }
+        public bool HasCompareAheadBehind => _compareAheadBehind.Length > 0;
+
         public bool HasMarkedCommit => _markedCommit != null;
 
         /// <summary>Names of branches/tags/remotes + HEAD, for the compare-refs picker (DIFF-007).</summary>
@@ -270,7 +279,13 @@ namespace MasterSplinter.Entrypoint.ViewModels
             {
                 var files = await Task.Run(() => repo.ChangedFilesRange(a, b));
                 DiffStat stat = await Task.Run(() => repo.RangeStat(a, b));
+                // BR-007: divergence between the two refs, alongside the diff. Computed here so
+                // comparing marked commits gets it too, not just the ref picker.
+                var ab = await Task.Run(() => repo.AheadBehind(a, b));
                 if (!IsCompareMode) return; // exited while loading
+                CompareAheadBehind = ab is { Ahead: 0, Behind: 0 }
+                    ? ""
+                    : $"↑{ab.Ahead} ahead · ↓{ab.Behind} behind";
                 PanelFiles.Clear();
                 foreach (var f in files) PanelFiles.Add(f);
                 ChangedSummary = FormatStat(stat);
@@ -299,6 +314,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
             _compareBase = null;
             _compareTarget = null;
             CompareTitle = "";
+            CompareAheadBehind = "";
         }
 
         // ---- Working copy / file status (STATUS-001/002/005) ------------------------------------
@@ -356,8 +372,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
 
             // Move the sidebar highlight back from "Working Copy" to the current branch.
             foreach (var i in Sidebar) i.IsSelected = false;
-            var current = Sidebar.FirstOrDefault(
-                i => i.Kind == SidebarKind.Branch && i.Text == Repository?.Branch);
+            var current = Sidebar.FirstOrDefault(i => i.Kind == SidebarKind.Branch && i.IsCurrent);
             if (current != null) current.IsSelected = true;
 
             CommitRow? commit = SelectedCommit;
@@ -587,6 +602,89 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 yield return file.OldPath;
         }
 
+        // ---- Branches & tags (Phase 5, BR-001..007 / TAG-001..003) -----------------------------
+
+        /// <summary>Shared plumbing for ref-changing operations (checkout / branch / tag).
+        /// Unlike <see cref="RunStatusMutationAsync"/> this deliberately does NOT arm
+        /// _suppressRepoRefreshUntil: that window exists to downgrade a repoDirty event to a
+        /// status-only reload for writes that touch only .git\index. These commands move HEAD and
+        /// refs, so the log, the decoration badges and the sidebar all have to be rebuilt — arming
+        /// the window would swallow exactly the refresh we need. Like CommitAsync we refresh
+        /// explicitly and let the IsLoading guard in OnRepositoryChanged absorb the watcher echo.
+        /// Returns git's error text, or null on success.</summary>
+        private async Task<string?> RunRefMutationAsync(Func<GitRepository, string?> operation,
+                                                        bool reportError = true)
+        {
+            if (_repo == null) return "No repository is open.";
+            GitRepository repo = _repo;
+            try
+            {
+                string? error = await Task.Run(() => operation(repo));
+                if (error != null)
+                {
+                    if (reportError) ErrorMessage = error;
+                    return error; // nothing changed — skip the refresh
+                }
+                await RefreshAsync();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                if (reportError) ErrorMessage = ex.Message;
+                return ex.Message;
+            }
+        }
+
+        /// <summary>BR-003. Not forced — git refuses rather than clobbering local changes.</summary>
+        public Task<string?> CheckoutBranchAsync(string name)
+            => RunRefMutationAsync(r => r.Checkout(name, detach: false));
+
+        /// <summary>BR-003 (detached): check out a commit directly.</summary>
+        public Task<string?> CheckoutCommitAsync(string sha)
+            => RunRefMutationAsync(r => r.Checkout(sha, detach: true));
+
+        /// <summary>Tracked changes that a branch switch could collide with. Untracked files never
+        /// block a switch, so they are excluded from the BR-003 warning count.</summary>
+        public async Task<int> CountLocalChangesAsync()
+        {
+            if (_repo == null) return 0;
+            GitRepository repo = _repo;
+            try
+            {
+                return await Task.Run(() =>
+                {
+                    var st = repo.Status();
+                    return st.Staged.Count + st.Unstaged.Count;
+                });
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>BR-004. An empty <paramref name="startPoint"/> means HEAD.</summary>
+        public Task<string?> CreateBranchAsync(string name, string startPoint, bool checkout)
+            => RunRefMutationAsync(r => r.CreateBranch(name.Trim(), startPoint.Trim(), checkout));
+
+        /// <summary>BR-005. The unforced attempt reports its error to the caller instead of the
+        /// InfoBar: it feeds the "delete anyway?" follow-up, so the flow is still in progress.</summary>
+        public Task<string?> DeleteBranchAsync(string name, bool force)
+            => RunRefMutationAsync(r => r.DeleteBranch(name, force), reportError: force);
+
+        /// <summary>BR-006.</summary>
+        public Task<string?> RenameBranchAsync(string oldName, string newName)
+            => RunRefMutationAsync(r => r.RenameBranch(oldName, newName.Trim()));
+
+        /// <summary>TAG-002. Blank message = lightweight tag; empty commitish = HEAD.</summary>
+        public Task<string?> CreateTagAsync(string name, string commitish, string message)
+            => RunRefMutationAsync(r => r.CreateTag(name.Trim(), commitish, message));
+
+        /// <summary>TAG-003.</summary>
+        public Task<string?> DeleteTagAsync(string name)
+            => RunRefMutationAsync(r => r.DeleteTag(name));
+
+        /// <summary>Start points offered by the create-branch dialog (BR-004): the same
+        /// HEAD + branches + remotes + tags list the compare picker uses.</summary>
+        public IReadOnlyList<string> StartPointOptions => _refNames;
+
         // ---- Binary / image diff (DIFF-005) ----------------------------------------------------
 
         private string _binaryInfoText = "";
@@ -712,16 +810,8 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 Recent.Clear();
                 foreach (var r in recent) Recent.Add(r);
 
-                // Sidebar from real refs.
-                var refs = await Task.Run(() => repo.ListRefs());
-                BuildSidebar(refs, repo.Branch);
-
-                // Ref names for the compare-refs picker (DIFF-007): HEAD + branches + remotes + tags.
-                _refNames = new List<string> { "HEAD" };
-                _refNames.AddRange(refs.Branches);
-                _refNames.AddRange(refs.Remotes);
-                _refNames.AddRange(refs.Tags);
-                Raise(nameof(CompareRefNames));
+                // Sidebar + ref caches from real refs.
+                ApplyRefs(await Task.Run(() => repo.ListRefs()));
 
                 await ReloadLogAsync();
             }
@@ -757,13 +847,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
                     Repository = reopened.ToInfo();
                 }
 
-                var refs = await Task.Run(() => repo.ListRefs());
-                BuildSidebar(refs, repo.Branch);
-                _refNames = new List<string> { "HEAD" };
-                _refNames.AddRange(refs.Branches);
-                _refNames.AddRange(refs.Remotes);
-                _refNames.AddRange(refs.Tags);
-                Raise(nameof(CompareRefNames));
+                ApplyRefs(await Task.Run(() => repo.ListRefs()));
 
                 var commits = await Task.Run(() => repo.Log(SelectedOrderIndex, MaxCommits));
                 _allCommits = commits.ToList();
@@ -1020,61 +1104,103 @@ namespace MasterSplinter.Entrypoint.ViewModels
 
         // ---- Sidebar ---------------------------------------------------------------------------
 
-        private void BuildSidebar(GitRepository.Refs refs, string currentBranch)
+        /// <summary>Push a freshly-read ref set into the sidebar, the compare picker, and the
+        /// caches the branch/tag dialogs read. Called from both load and refresh.</summary>
+        private void ApplyRefs(GitRepository.RefList refs)
+        {
+            BuildSidebar(refs);
+
+            // Ref names for the compare-refs picker (DIFF-007) and the create-branch start point
+            // (BR-004): HEAD + branches + remotes + tags.
+            _refNames = new List<string> { "HEAD" };
+            _refNames.AddRange(refs.Branches.Select(b => b.Name));
+            _refNames.AddRange(refs.Remotes.Select(r => $"{r.Remote}/{r.Name}"));
+            _refNames.AddRange(refs.Tags.Select(t => t.Name));
+            Raise(nameof(CompareRefNames));
+        }
+
+        private void BuildSidebar(GitRepository.RefList refs)
         {
             Sidebar.Clear();
 
-            void Add(string text, SidebarKind kind, int level, SidebarItemVM? parent)
-                => Sidebar.Add(new SidebarItemVM { Text = text, Kind = kind, Level = level, ParentItem = parent });
+            void Add(SidebarItemVM item) => Sidebar.Add(item);
 
-            Add("FILE STATUS", SidebarKind.SectionHeader, 0, null);
+            void AddPlain(string text, SidebarKind kind, int level, SidebarItemVM? parent)
+                => Add(new SidebarItemVM { Text = text, Kind = kind, Level = level, ParentItem = parent });
+
+            AddPlain("FILE STATUS", SidebarKind.SectionHeader, 0, null);
             var fileStatus = Sidebar[^1];
-            Add("Working Copy", SidebarKind.WorkingCopy, 1, fileStatus);
+            AddPlain("Working Copy", SidebarKind.WorkingCopy, 1, fileStatus);
 
-            Add("BRANCHES", SidebarKind.SectionHeader, 0, null);
+            AddPlain("BRANCHES", SidebarKind.SectionHeader, 0, null);
             var branches = Sidebar[^1];
             foreach (var b in refs.Branches)
-                Add(b, SidebarKind.Branch, 1, branches);
+                Add(new SidebarItemVM
+                {
+                    Text = b.Name,
+                    ShortName = b.Name,
+                    RefName = b.RefName,
+                    Sha = b.Sha,
+                    Upstream = b.Upstream,
+                    Ahead = b.Ahead,
+                    Behind = b.Behind,
+                    UpstreamGone = b.UpstreamGone,
+                    IsCurrent = b.IsCurrent,
+                    Kind = SidebarKind.Branch,
+                    Level = 1,
+                    ParentItem = branches,
+                });
 
             if (refs.Tags.Count > 0)
             {
-                Add("TAGS", SidebarKind.SectionHeader, 0, null);
+                AddPlain("TAGS", SidebarKind.SectionHeader, 0, null);
                 var tags = Sidebar[^1];
                 foreach (var t in refs.Tags)
-                    Add(t, SidebarKind.Tag, 1, tags);
+                    Add(new SidebarItemVM
+                    {
+                        Text = t.Name,
+                        ShortName = t.Name,
+                        RefName = t.RefName,
+                        Sha = t.CommitSha,
+                        Kind = SidebarKind.Tag,
+                        Level = 1,
+                        ParentItem = tags,
+                    });
             }
 
             if (refs.Remotes.Count > 0)
             {
-                Add("REMOTES", SidebarKind.SectionHeader, 0, null);
+                AddPlain("REMOTES", SidebarKind.SectionHeader, 0, null);
                 var remotesHeader = Sidebar[^1];
 
                 // Group "origin/main", "origin/dev" -> origin { main, dev }.
                 foreach (var group in refs.Remotes
-                             .Select(SplitRemote)
-                             .GroupBy(x => x.remote, StringComparer.Ordinal)
+                             .GroupBy(r => r.Remote, StringComparer.Ordinal)
                              .OrderBy(g => g.Key, StringComparer.Ordinal))
                 {
-                    Add(group.Key, SidebarKind.Remote, 1, remotesHeader);
+                    AddPlain(group.Key, SidebarKind.Remote, 1, remotesHeader);
                     var remoteNode = Sidebar[^1];
-                    foreach (var branch in group.Select(x => x.branch).Where(b => b.Length > 0))
-                        Add(branch, SidebarKind.RemoteBranch, 2, remoteNode);
+                    foreach (var r in group.Where(r => r.Name.Length > 0))
+                        Add(new SidebarItemVM
+                        {
+                            // Displayed as "dev" under the "origin" node, but git wants "origin/dev".
+                            Text = r.Name,
+                            ShortName = $"{r.Remote}/{r.Name}",
+                            RefName = r.RefName,
+                            Sha = r.Sha,
+                            Kind = SidebarKind.RemoteBranch,
+                            Level = 2,
+                            ParentItem = remoteNode,
+                        });
                 }
             }
 
-            // Highlight the current branch, if present.
-            var current = Sidebar.FirstOrDefault(i => i.Kind == SidebarKind.Branch && i.Text == currentBranch);
+            // Start with the checked-out branch selected. Nothing is current on a detached HEAD,
+            // which is a correct no-op rather than an error.
+            var current = Sidebar.FirstOrDefault(i => i.IsCurrent);
             if (current != null) current.IsSelected = true;
 
             RecomputeVisibility();
-        }
-
-        private static (string remote, string branch) SplitRemote(string remoteRef)
-        {
-            int slash = remoteRef.IndexOf('/');
-            return slash < 0
-                ? (remoteRef, "")
-                : (remoteRef[..slash], remoteRef[(slash + 1)..]);
         }
 
         public void ToggleSidebar(SidebarItemVM item)

@@ -132,6 +132,23 @@ namespace MasterSplinter.Entrypoint.Models
         public DateTimeOffset LastOpenedUtc { get; set; }
     }
 
+    // ---- Refs (Phase 5, BR-001..007 / TAG-001..003) ---------------------------------------------
+    // One record each from MsGitRefDetails. `Name` is the short form git verbs take (what gets
+    // passed to switch/branch/tag); `RefName` is the full ref, kept for ref-scoped operations.
+
+    /// <summary>A local branch. Ahead/Behind are relative to this branch's own upstream, and are
+    /// 0/0 both when in sync and when the track text could not be parsed.</summary>
+    public sealed record BranchInfo(string RefName, string Name, string Sha, string Upstream,
+                                    int Ahead, int Behind, bool UpstreamGone, bool IsCurrent);
+
+    /// <summary>A tag. CommitSha is the peeled commit, so annotated tags point at the commit
+    /// rather than at their tag object.</summary>
+    public sealed record TagInfo(string RefName, string Name, string CommitSha, bool IsAnnotated);
+
+    /// <summary>A remote-tracking branch, pre-split for the sidebar's remote grouping. `Name` is
+    /// the part below the remote ("feature/x" for origin/feature/x).</summary>
+    public sealed record RemoteBranchInfo(string RefName, string Remote, string Name, string Sha);
+
     // ---- Changed files & diff -------------------------------------------------------------------
 
     public enum FileChangeStatus { Added, Modified, Deleted, Renamed, Untracked }

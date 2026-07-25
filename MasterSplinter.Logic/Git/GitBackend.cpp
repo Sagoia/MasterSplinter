@@ -74,7 +74,19 @@ namespace ms
         int code2;
         std::string branch = RunGitC(path, { "rev-parse", "--abbrev-ref", "HEAD" }, code2);
         TrimTrailingNewlines(branch);
-        if (branch == "HEAD") // detached HEAD -> show the short hash instead
+        if (code2 != 0)
+        {
+            // Unborn branch (a fresh repo with no commits): rev-parse exits non-zero and its
+            // merged output is git's "ambiguous argument 'HEAD'" text, which would otherwise be
+            // displayed verbatim as the branch name. symbolic-ref still knows the branch.
+            int code3;
+            std::string sym = RunGitC(path, { "symbolic-ref", "--short", "-q", "HEAD" }, code3);
+            TrimTrailingNewlines(sym);
+            branch = (code3 == 0 && !sym.empty())
+                ? sym + " (no commits yet)"
+                : std::string("(no commits yet)");
+        }
+        else if (branch == "HEAD") // detached HEAD -> show the short hash instead
         {
             int code3;
             std::string sh = RunGitC(path, { "rev-parse", "--short", "HEAD" }, code3);
@@ -120,15 +132,26 @@ namespace ms
         return RunGitC(root, args, code);
     }
 
-    std::string GitBackend::Refs(const std::string& root) const
+    std::string GitBackend::RefDetails(const std::string& root) const
     {
         if (root.empty())
             return std::string();
-        // One ref per line (the C# side splits on newline). NOTE: do NOT use NUL separators here
-        // or anywhere a char* is returned -- the managed marshaller stops at the first NUL byte.
+        // Eight fixed fields per ref, US-separated, RS-terminated (git adds a newline after each
+        // record, which the C# splitter trims). The field COUNT is constant even when several
+        // fields are empty, so positional parsing stays stable.
+        //
+        // GOTCHA: for-each-ref escapes are "%xx" (two hex digits) -- NOT log --pretty's "%xNN".
+        // Writing %x1f here emits the literal text "%x1f". The exact-argv gtest pins this.
+        //
+        // %(upstream:track,nobracket) is preferred over %(ahead-behind:<committish>): the latter
+        // needs git 2.41 and measures every ref against ONE committish, whereas the sidebar wants
+        // each branch against its own upstream. Per-branch rev-list would be N spawns per refresh.
+        const std::string fmt =
+            "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(objecttype)%1f"
+            "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(HEAD)%1f%(symref)%1e";
         int code;
         return RunGitC(root,
-            { "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags", "refs/remotes" },
+            { "for-each-ref", "--sort=refname", fmt, "refs/heads", "refs/tags", "refs/remotes" },
             code);
     }
 
@@ -410,5 +433,129 @@ namespace ms
         }
         TrimTrailingNewlines(out);
         return std::string("OK") + US + out; // OK US subject US body
+    }
+
+    // ---- Branches & tags (Phase 5, BR-001..007 / TAG-001..003) ---------------------------------
+
+    std::string GitBackend::Checkout(const std::string& root, const std::string& refName,
+                                     bool detach) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(refName))
+            return Err("No branch or commit was provided");
+        // `switch` rather than `checkout`: it only ever takes a ref, so a branch name can never be
+        // mistaken for a pathspec. Deliberately NOT forced -- git carries uncommitted changes
+        // across when it safely can and refuses otherwise, and that refusal is what the UI shows.
+        std::vector<std::string> args = { "switch" };
+        if (detach)
+            args.push_back("--detach");
+        args.push_back(refName);
+        int code;
+        std::string out = RunGitC(root, args, code);
+        return OkOrErr(std::move(out), code, "git switch failed");
+    }
+
+    std::string GitBackend::CreateBranch(const std::string& root, const std::string& name,
+                                         const std::string& startPoint, bool checkout) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(name))
+            return Err("No branch name was provided");
+        // `switch -c` creates and checks out atomically, and sets the upstream automatically when
+        // the start point is a remote-tracking ref. Never -C/-B: an existing name must fail loudly.
+        // An empty start point means "from HEAD" -- git's own default when the argument is omitted.
+        std::vector<std::string> args = checkout
+            ? std::vector<std::string>{ "switch", "-c", name }
+            : std::vector<std::string>{ "branch", name };
+        if (!startPoint.empty())
+            args.push_back(startPoint);
+        int code;
+        std::string out = RunGitC(root, args, code);
+        return OkOrErr(std::move(out), code, "git branch failed");
+    }
+
+    std::string GitBackend::DeleteBranch(const std::string& root, const std::string& name,
+                                         bool force) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(name))
+            return Err("No branch name was provided");
+        // BR-005: callers must attempt force=false first, so an unmerged branch can only be
+        // dropped after git has refused once and the user has confirmed a second time.
+        int code;
+        std::string out = RunGitC(root, { "branch", force ? "-D" : "-d", name }, code);
+        return OkOrErr(std::move(out), code, "git branch failed");
+    }
+
+    std::string GitBackend::RenameBranch(const std::string& root, const std::string& oldName,
+                                         const std::string& newName) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(oldName) || IsBlank(newName))
+            return Err("No branch name was provided");
+        // -m, never -M: renaming onto an existing branch must fail instead of clobbering it.
+        // Renaming the current branch is fine -- git rewrites .git/HEAD itself.
+        int code;
+        std::string out = RunGitC(root, { "branch", "-m", oldName, newName }, code);
+        return OkOrErr(std::move(out), code, "git branch failed");
+    }
+
+    std::string GitBackend::CreateTag(const std::string& root, const std::string& name,
+                                      const std::string& commitish, const std::string& message) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(name))
+            return Err("No tag name was provided");
+        // A blank message means a lightweight tag (TAG-002); any real message makes it annotated,
+        // fed through stdin like `commit -F -` so multi-line text and quoting are non-issues.
+        // No --cleanup=: git has no tag.cleanup config, so the default is already deterministic.
+        const bool annotated = !IsBlank(message);
+        std::vector<std::string> args = { "tag" };
+        if (annotated)
+        {
+            args.push_back("-a");
+            args.push_back("-F");
+            args.push_back("-");
+        }
+        args.push_back(name);
+        if (!commitish.empty())
+            args.push_back(commitish);
+        int code;
+        std::string out = annotated
+            ? RunGitC(root, args, message, code)
+            : RunGitC(root, args, code);
+        return OkOrErr(std::move(out), code, "git tag failed");
+    }
+
+    std::string GitBackend::DeleteTag(const std::string& root, const std::string& name) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(name))
+            return Err("No tag name was provided");
+        int code;
+        std::string out = RunGitC(root, { "tag", "-d", name }, code);
+        return OkOrErr(std::move(out), code, "git tag failed");
+    }
+
+    std::string GitBackend::AheadBehind(const std::string& root, const std::string& a,
+                                        const std::string& b) const
+    {
+        if (root.empty() || a.empty() || b.empty())
+            return std::string();
+        // "<left>\t<right>" for the symmetric difference: left = commits only in a, right = only
+        // in b. The three-dot form is required; two dots would report just one side. This is a
+        // read op (empty on failure) because it decorates the compare banner rather than acting.
+        int code;
+        std::string out = RunGitC(root, { "rev-list", "--left-right", "--count", a + "..." + b }, code);
+        if (code != 0)
+            return std::string();
+        TrimTrailingNewlines(out);
+        return out;
     }
 }

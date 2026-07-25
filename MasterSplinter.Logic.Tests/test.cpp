@@ -19,9 +19,19 @@ namespace
     // 0x1F unit separator (the field separator GitBackend uses in OpenRepository's OK/ERR reply).
     const std::string US = std::string(1, '\x1f');
 
+    // 0x1E record separator (used by the for-each-ref payloads below).
+    const std::string RS = std::string(1, '\x1e');
+
     // Must match the pretty-format string in GitBackend::Log exactly.
     const std::string FMT =
         "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%s%x1f%b%x1e";
+
+    // Must match the format string in GitBackend::RefDetails exactly. Pinned here because
+    // for-each-ref uses "%xx" hex escapes, not log --pretty's "%xNN" — writing %x1f would emit
+    // the literal text "%x1f" and silently empty the sidebar.
+    const std::string REF_FMT =
+        "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(objecttype)%1f"
+        "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(HEAD)%1f%(symref)%1e";
 
     // A GitBackend wired to a FakeProcessRunner we retain a (non-owning) pointer to, so a test can
     // script responses and then inspect the recorded calls.
@@ -145,6 +155,30 @@ TEST(OpenRepository, EmptyBranchMeansNoCommitsYet)
     EXPECT_EQ(h.backend->OpenRepository("path"), "OK" + US + "top" + US + "(no commits yet)");
 }
 
+TEST(OpenRepository, UnbornBranchFallsBackToSymbolicRef)
+{
+    // A fresh `git init` has no commits, so rev-parse exits 128 and prints "ambiguous argument"
+    // to stderr. Without the fallback that text would be displayed as the branch name.
+    auto h = MakeHarness();
+    h.fake->AddResponse("top\n", 0);
+    h.fake->AddResponse("fatal: ambiguous argument 'HEAD': unknown revision or path not in the "
+                        "working tree.\nHEAD\n", 128);
+    h.fake->AddResponse("main\n", 0); // symbolic-ref --short -q HEAD
+
+    EXPECT_EQ(h.backend->OpenRepository("path"), "OK" + US + "top" + US + "main (no commits yet)");
+    ASSERT_EQ(h.fake->CallCount(), 3u);
+    EXPECT_EQ(h.fake->ArgsOf(2), (Args{ "-C", "path", "symbolic-ref", "--short", "-q", "HEAD" }));
+}
+
+TEST(OpenRepository, UnbornBranchWithNoSymbolicRefStillReadable)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("top\n", 0);
+    h.fake->AddResponse("fatal: ambiguous argument 'HEAD'\n", 128);
+    h.fake->AddResponse("", 1); // symbolic-ref also fails
+    EXPECT_EQ(h.backend->OpenRepository("path"), "OK" + US + "top" + US + "(no commits yet)");
+}
+
 // ---- Log ---------------------------------------------------------------------------------------
 
 TEST(Log, DateOrderWithLimitBuildsExactArgs)
@@ -199,23 +233,53 @@ TEST(Log, EmptyRootReturnsEmptyWithoutCallingGit)
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
-// ---- Refs --------------------------------------------------------------------------------------
+// ---- RefDetails (BR-001/BR-002/TAG-001) --------------------------------------------------------
 
-TEST(Refs, BuildsForEachRefArgs)
+TEST(RefDetails, BuildsForEachRefArgs)
 {
     auto h = MakeHarness();
-    h.fake->SetResponse("refs/heads/main\n", 0);
-    h.backend->Refs("root");
+    h.fake->SetResponse("", 0);
+    h.backend->RefDetails("root");
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "for-each-ref", "--format=%(refname)",
+              (Args{ "-C", "root", "for-each-ref", "--sort=refname", REF_FMT,
                      "refs/heads", "refs/tags", "refs/remotes" }));
 }
 
-TEST(Refs, EmptyRootReturnsEmptyWithoutCallingGit)
+TEST(RefDetails, FormatUsesForEachRefHexEscapesNotPrettyFormatOnes)
+{
+    // Regression guard for the %1f-vs-%x1f trap: %x1f is what `log --pretty` wants and would be
+    // emitted literally by for-each-ref.
+    EXPECT_NE(REF_FMT.find("%1f"), std::string::npos);
+    EXPECT_EQ(REF_FMT.find("%x1f"), std::string::npos);
+}
+
+TEST(RefDetails, EmptyRootReturnsEmptyWithoutCallingGit)
 {
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->Refs(""), "");
+    EXPECT_EQ(h.backend->RefDetails(""), "");
     EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(RefDetails, ReturnsRawOutputUnmodified)
+{
+    // Two records: a branch with an upstream that is ahead+behind and checked out, and a tag with
+    // every optional field empty. The 8-field shape must survive byte-for-byte for the C# parser.
+    auto h = MakeHarness();
+    const std::string payload =
+        "refs/heads/main" + US + "aaa" + US + "" + US + "commit" + US +
+        "origin/main" + US + "ahead 2, behind 1" + US + "*" + US + "" + RS + "\n" +
+        "refs/tags/v1" + US + "bbb" + US + "" + US + "commit" + US +
+        "" + US + "" + US + " " + US + "" + RS + "\n";
+    h.fake->SetResponse(payload, 0);
+    EXPECT_EQ(h.backend->RefDetails("root"), payload);
+}
+
+TEST(RefDetails, RecordsNoStdin)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->RefDetails("root");
+    EXPECT_FALSE(h.fake->InputOf(0).has_value());
 }
 
 // ---- Changed files -----------------------------------------------------------------------------
@@ -662,6 +726,306 @@ TEST(HeadMessage, ErrWhenNoCommits)
               "ERR" + US + "fatal: your current branch 'master' does not have any commits yet");
 }
 
+// ---- Checkout (BR-003) -------------------------------------------------------------------------
+
+TEST(Checkout, BuildsSwitchArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("Switched to branch 'feature'\n", 0);
+    EXPECT_EQ(h.backend->Checkout("root", "feature", false), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "switch", "feature" }));
+    EXPECT_FALSE(h.fake->InputOf(0).has_value());
+}
+
+TEST(Checkout, DetachAddsFlagBeforeRef)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->Checkout("root", "abc1234", true), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "switch", "--detach", "abc1234" }));
+}
+
+TEST(Checkout, NeverForces)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->Checkout("root", "feature", false);
+    EXPECT_FALSE(h.fake->ArgsContain(0, "--force"));
+    EXPECT_FALSE(h.fake->ArgsContain(0, "-f"));
+}
+
+TEST(Checkout, EmptyRefReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Checkout("root", "  ", false),
+              "ERR" + US + "No branch or commit was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Checkout, EmptyRootReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Checkout("", "feature", false),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Checkout, ErrIncludesGitOutputOnDirtyTreeRefusal)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("error: Your local changes to the following files would be overwritten\n", 1);
+    EXPECT_EQ(h.backend->Checkout("root", "feature", false),
+              "ERR" + US + "error: Your local changes to the following files would be overwritten");
+}
+
+// ---- CreateBranch (BR-004) ---------------------------------------------------------------------
+
+TEST(CreateBranch, BranchFromHeadWhenNoStartPoint)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->CreateBranch("root", "feature", "", false), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "branch", "feature" }));
+}
+
+TEST(CreateBranch, BranchWithStartPoint)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CreateBranch("root", "feature", "origin/main", false);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "branch", "feature", "origin/main" }));
+}
+
+TEST(CreateBranch, SwitchDashCWhenCheckoutRequested)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CreateBranch("root", "feature", "", true);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "switch", "-c", "feature" }));
+}
+
+TEST(CreateBranch, SwitchDashCWithStartPoint)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CreateBranch("root", "feature", "abc1234", true);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "switch", "-c", "feature", "abc1234" }));
+}
+
+TEST(CreateBranch, NeverUsesForcingVariants)
+{
+    // `switch -C` / `branch -f` would silently clobber an existing branch. Assert on the flag's
+    // position rather than membership: every command already carries a leading `-C <root>`.
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CreateBranch("root", "feature", "", true);
+    EXPECT_EQ(h.fake->ArgsOf(0)[3], "-c");
+    h.fake->SetResponse("", 0);
+    h.backend->CreateBranch("root", "feature", "", false);
+    EXPECT_FALSE(h.fake->ArgsContain(1, "-f"));
+    EXPECT_FALSE(h.fake->ArgsContain(1, "--force"));
+}
+
+TEST(CreateBranch, BlankNameReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->CreateBranch("root", " \t ", "", false),
+              "ERR" + US + "No branch name was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(CreateBranch, ErrWhenBranchAlreadyExists)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: a branch named 'feature' already exists\n", 128);
+    EXPECT_EQ(h.backend->CreateBranch("root", "feature", "", false),
+              "ERR" + US + "fatal: a branch named 'feature' already exists");
+}
+
+// ---- DeleteBranch (BR-005) ---------------------------------------------------------------------
+
+TEST(DeleteBranch, SafeDeleteUsesLowercaseD)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("Deleted branch feature (was abc1234).\n", 0);
+    EXPECT_EQ(h.backend->DeleteBranch("root", "feature", false), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "branch", "-d", "feature" }));
+}
+
+TEST(DeleteBranch, ForceUsesUppercaseD)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->DeleteBranch("root", "feature", true);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "branch", "-D", "feature" }));
+}
+
+TEST(DeleteBranch, BlankNameReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->DeleteBranch("root", "", false),
+              "ERR" + US + "No branch name was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(DeleteBranch, ErrIncludesNotFullyMergedMessage)
+{
+    // This exact text is what the UI quotes back in its "delete anyway?" follow-up (BR-005).
+    auto h = MakeHarness();
+    h.fake->SetResponse("error: the branch 'feature' is not fully merged\n", 1);
+    EXPECT_EQ(h.backend->DeleteBranch("root", "feature", false),
+              "ERR" + US + "error: the branch 'feature' is not fully merged");
+}
+
+// ---- RenameBranch (BR-006) ---------------------------------------------------------------------
+
+TEST(RenameBranch, BuildsBranchDashMArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->RenameBranch("root", "old", "new"), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "branch", "-m", "old", "new" }));
+}
+
+TEST(RenameBranch, BlankOldNameReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->RenameBranch("root", "", "new"),
+              "ERR" + US + "No branch name was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(RenameBranch, BlankNewNameReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->RenameBranch("root", "old", "  "),
+              "ERR" + US + "No branch name was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(RenameBranch, ErrOnFailure)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: a branch named 'new' already exists\n", 128);
+    EXPECT_EQ(h.backend->RenameBranch("root", "old", "new"),
+              "ERR" + US + "fatal: a branch named 'new' already exists");
+}
+
+// ---- CreateTag (TAG-002) -----------------------------------------------------------------------
+
+TEST(CreateTag, LightweightAtCommitSendsNoStdin)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->CreateTag("root", "v1.0", "abc1234", ""), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "tag", "v1.0", "abc1234" }));
+    EXPECT_FALSE(h.fake->InputOf(0).has_value());
+}
+
+TEST(CreateTag, LightweightAtHeadOmitsCommitish)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CreateTag("root", "v1.0", "", "");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "tag", "v1.0" }));
+}
+
+TEST(CreateTag, AnnotatedFeedsMessageOnStdin)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->CreateTag("root", "v1.0", "abc1234", "release notes\nsecond line"), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "tag", "-a", "-F", "-", "v1.0", "abc1234" }));
+    ASSERT_TRUE(h.fake->InputOf(0).has_value());
+    EXPECT_EQ(*h.fake->InputOf(0), "release notes\nsecond line");
+}
+
+TEST(CreateTag, AnnotatedAtHeadOmitsCommitish)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CreateTag("root", "v1.0", "", "notes");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "tag", "-a", "-F", "-", "v1.0" }));
+}
+
+TEST(CreateTag, WhitespaceOnlyMessageStaysLightweight)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CreateTag("root", "v1.0", "", " \t\r\n ");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "tag", "v1.0" }));
+    EXPECT_FALSE(h.fake->InputOf(0).has_value());
+}
+
+TEST(CreateTag, BlankNameReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->CreateTag("root", " ", "abc1234", ""),
+              "ERR" + US + "No tag name was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(CreateTag, ErrWhenTagExists)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: tag 'v1.0' already exists\n", 128);
+    EXPECT_EQ(h.backend->CreateTag("root", "v1.0", "", ""),
+              "ERR" + US + "fatal: tag 'v1.0' already exists");
+}
+
+// ---- DeleteTag (TAG-003) -----------------------------------------------------------------------
+
+TEST(DeleteTag, BuildsTagDashDArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("Deleted tag 'v1.0' (was abc1234)\n", 0);
+    EXPECT_EQ(h.backend->DeleteTag("root", "v1.0"), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "tag", "-d", "v1.0" }));
+}
+
+TEST(DeleteTag, BlankNameReturnsErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->DeleteTag("root", ""), "ERR" + US + "No tag name was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(DeleteTag, ErrOnFailure)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("error: tag 'v1.0' not found.\n", 1);
+    EXPECT_EQ(h.backend->DeleteTag("root", "v1.0"), "ERR" + US + "error: tag 'v1.0' not found.");
+}
+
+// ---- AheadBehind (BR-007) ----------------------------------------------------------------------
+
+TEST(AheadBehind, BuildsRevListThreeDotArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("2\t3\n", 0);
+    EXPECT_EQ(h.backend->AheadBehind("root", "main", "feature"), "2\t3");
+    // The two refs are joined into ONE argument -- "main feature" as separate args would mean
+    // something else entirely to rev-list.
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "rev-list", "--left-right", "--count", "main...feature" }));
+}
+
+TEST(AheadBehind, EmptyOnGitError)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: bad revision\n", 128);
+    EXPECT_EQ(h.backend->AheadBehind("root", "main", "nope"), "");
+}
+
+TEST(AheadBehind, EmptyRefsReturnEmptyWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->AheadBehind("root", "", "feature"), "");
+    EXPECT_EQ(h.backend->AheadBehind("root", "main", ""), "");
+    EXPECT_EQ(h.backend->AheadBehind("", "main", "feature"), "");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
 // ---- Null runner (defensive) -------------------------------------------------------------------
 
 TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
@@ -676,4 +1040,12 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
     EXPECT_EQ(backend.DiscardPaths("root", { "a" }), "ERR" + US + "git restore failed");
     EXPECT_EQ(backend.Commit("root", "msg", false), "ERR" + US + "git commit failed");
     EXPECT_EQ(backend.HeadMessage("root"), "ERR" + US + "There is no commit yet");
+    EXPECT_EQ(backend.RefDetails("root"), "");
+    EXPECT_EQ(backend.Checkout("root", "feature", false), "ERR" + US + "git switch failed");
+    EXPECT_EQ(backend.CreateBranch("root", "feature", "", false), "ERR" + US + "git branch failed");
+    EXPECT_EQ(backend.DeleteBranch("root", "feature", false), "ERR" + US + "git branch failed");
+    EXPECT_EQ(backend.RenameBranch("root", "old", "new"), "ERR" + US + "git branch failed");
+    EXPECT_EQ(backend.CreateTag("root", "v1", "", ""), "ERR" + US + "git tag failed");
+    EXPECT_EQ(backend.DeleteTag("root", "v1"), "ERR" + US + "git tag failed");
+    EXPECT_EQ(backend.AheadBehind("root", "a", "b"), "");
 }

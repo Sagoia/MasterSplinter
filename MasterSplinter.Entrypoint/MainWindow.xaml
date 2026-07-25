@@ -90,7 +90,7 @@
                     <MenuFlyoutItem Text="Pull…" />
                     <MenuFlyoutItem Text="Fetch…" />
                     <MenuFlyoutSeparator />
-                    <MenuFlyoutItem Text="Branch…" />
+                    <MenuFlyoutItem Text="Branch…" Click="ActionsBranch_Click" />
                     <MenuFlyoutItem Text="Merge…" />
                     <MenuFlyoutItem Text="Stash" />
                 </MenuBarItem>

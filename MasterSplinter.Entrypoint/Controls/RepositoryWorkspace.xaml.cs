@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
@@ -450,6 +451,404 @@ namespace MasterSplinter.Entrypoint.Controls
                 DefaultButton = ContentDialogButton.Close,
             };
             await dialog.ShowAsync();
+        }
+
+        // ---- Branches & tags (Phase 5, BR-001..007 / TAG-001..003) -----------------------------
+
+        /// <summary>Resolves the sidebar row a context-menu item or double-tap belongs to.</summary>
+        private static SidebarItemVM? SidebarItemOf(object sender)
+            => (sender as FrameworkElement)?.DataContext as SidebarItemVM
+               ?? ((sender as MenuFlyout)?.Target as FrameworkElement)?.DataContext as SidebarItemVM;
+
+        /// <summary>Show only the items that apply to this row's kind. Delete is hidden on the
+        /// current branch — that is the one refusal `-D` cannot fix, and hiding it beats making
+        /// the user discover it (BR-005).</summary>
+        private void SidebarMenu_Opening(object sender, object e)
+        {
+            if (sender is not MenuFlyout menu)
+                return;
+            SidebarItemVM? item = SidebarItemOf(menu);
+            if (item == null)
+                return;
+
+            bool isBranch = item.Kind == SidebarKind.Branch;
+            bool isRemote = item.Kind == SidebarKind.RemoteBranch;
+            bool isTag = item.Kind == SidebarKind.Tag;
+            bool isRef = isBranch || isRemote || isTag;
+
+            foreach (var entry in menu.Items)
+            {
+                if (entry is not MenuFlyoutItemBase mib || mib.Tag is not string tag)
+                    continue;
+                bool visible = tag switch
+                {
+                    "checkout" => isBranch && !item.IsCurrent,
+                    "checkoutlocal" => isRemote,
+                    "newfrom" => isRef,
+                    "rename" => isBranch,
+                    "sep" => isRef,
+                    "deletebranch" => isBranch && !item.IsCurrent,
+                    "deletetag" => isTag,
+                    "copyname" => isRef,
+                    _ => true,
+                };
+                mib.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            }
+        }
+
+        private async void SidebarLeaf_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item == null)
+                return;
+            if (item.Kind == SidebarKind.Branch && !item.IsCurrent)
+                await SwitchToBranchAsync(item.ShortName);
+            else if (item.Kind == SidebarKind.RemoteBranch)
+                await ShowCreateBranchDialogAsync(item.ShortName, $"local branch from {item.ShortName}");
+        }
+
+        private async void SidebarCheckout_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item != null)
+                await SwitchToBranchAsync(item.ShortName);
+        }
+
+        private async void SidebarCheckoutLocal_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item != null)
+                await ShowCreateBranchDialogAsync(item.ShortName, $"local branch from {item.ShortName}");
+        }
+
+        private async void SidebarCreateBranch_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item != null)
+                await ShowCreateBranchDialogAsync(item.ShortName, item.ShortName);
+        }
+
+        private async void SidebarRenameBranch_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item != null)
+                await ShowRenameBranchDialogAsync(item.ShortName);
+        }
+
+        private async void SidebarDeleteBranch_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item != null)
+                await DeleteBranchWithConfirmAsync(item.ShortName);
+        }
+
+        private async void SidebarDeleteTag_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item != null)
+                await DeleteTagWithConfirmAsync(item.ShortName);
+        }
+
+        private void SidebarCopyRefName_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item == null)
+                return;
+            var data = new DataPackage();
+            data.SetText(item.ShortName);
+            Clipboard.SetContent(data);
+        }
+
+        // ---- Toolbar / commit-row entry points -------------------------------------------------
+
+        /// <summary>Toolbar Branch / Actions ▸ Branch…: create from the selected commit when there
+        /// is one, else from HEAD.</summary>
+        public Task ShowCreateBranchDialogFromSelectionAsync()
+        {
+            CommitRow? c = Vm.SelectedCommit;
+            return c == null
+                ? ShowCreateBranchDialogAsync("", "HEAD")
+                : ShowCreateBranchDialogAsync(c.FullHash, $"{c.Hash} — {c.Message}");
+        }
+
+        private async void BranchToolbar_Click(object sender, RoutedEventArgs e)
+            => await ShowCreateBranchDialogFromSelectionAsync();
+
+        private async void TagToolbar_Click(object sender, RoutedEventArgs e)
+        {
+            CommitRow? c = Vm.SelectedCommit;
+            if (c == null)
+                await ShowCreateTagDialogAsync("", "HEAD");
+            else
+                await ShowCreateTagDialogAsync(c.FullHash, $"{c.Hash} — {c.Message}");
+        }
+
+        private async void CreateBranchHere_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is CommitRow c)
+                await ShowCreateBranchDialogAsync(c.FullHash, $"{c.Hash} — {c.Message}");
+        }
+
+        private async void CreateTagHere_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is CommitRow c)
+                await ShowCreateTagDialogAsync(c.FullHash, $"{c.Hash} — {c.Message}");
+        }
+
+        private async void CheckoutCommit_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not CommitRow c)
+                return;
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Check out commit",
+                Content = new TextBlock
+                {
+                    Text = $"Checking out {c.Hash} leaves HEAD detached — new commits will not "
+                         + "belong to any branch. Create a branch first if you plan to commit.",
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                PrimaryButtonText = "Check Out",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                await Vm.CheckoutCommitAsync(c.FullHash);
+        }
+
+        // ---- The dialogs ----------------------------------------------------------------------
+
+        /// <summary>BR-003. Warns when the working tree is dirty, then runs a plain switch: git
+        /// carries the changes across when it safely can and refuses otherwise, and that refusal
+        /// reaches the InfoBar. Nothing here forces or stashes.</summary>
+        private async Task SwitchToBranchAsync(string name)
+        {
+            int changes = await Vm.CountLocalChangesAsync();
+            if (changes > 0)
+            {
+                var warn = new ContentDialog
+                {
+                    XamlRoot = XamlRoot,
+                    Title = "Switch branch",
+                    Content = new TextBlock
+                    {
+                        Text = $"You have {changes} uncommitted change{(changes == 1 ? "" : "s")}. "
+                             + $"Git will carry {(changes == 1 ? "it" : "them")} across to {name} when it "
+                             + "safely can, and refuse the switch otherwise.",
+                        TextWrapping = TextWrapping.Wrap,
+                    },
+                    PrimaryButtonText = "Switch",
+                    CloseButtonText = "Cancel",
+                    DefaultButton = ContentDialogButton.Primary,
+                };
+                if (await warn.ShowAsync() != ContentDialogResult.Primary)
+                    return;
+            }
+            await Vm.CheckoutBranchAsync(name);
+        }
+
+        /// <summary>BR-004. <paramref name="startPoint"/> is passed to git ("" = HEAD);
+        /// <paramref name="startLabel"/> is what the picker shows for it.</summary>
+        public async Task ShowCreateBranchDialogAsync(string startPoint, string startLabel)
+        {
+            if (!Vm.HasRepository)
+            {
+                await ShowMessageAsync("Create branch", "Open a repository first.");
+                return;
+            }
+
+            var nameBox = new TextBox
+            {
+                Header = "Branch name",
+                PlaceholderText = "feature/my-change",
+                MinWidth = 360,
+            };
+            // The invoking ref/commit heads the list and is preselected; the rest are the same
+            // HEAD + branches + remotes + tags the compare picker offers.
+            var options = new List<string> { startLabel };
+            foreach (string n in Vm.StartPointOptions)
+                if (n != startLabel)
+                    options.Add(n);
+            var startBox = new ComboBox
+            {
+                Header = "Starting point",
+                ItemsSource = options,
+                SelectedIndex = 0,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            var checkoutBox = new CheckBox { Content = "Check out new branch", IsChecked = true };
+
+            var panel = new StackPanel { Spacing = 12, MinWidth = 360 };
+            panel.Children.Add(nameBox);
+            panel.Children.Add(startBox);
+            panel.Children.Add(checkoutBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Create branch",
+                Content = panel,
+                PrimaryButtonText = "Create",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+                IsPrimaryButtonEnabled = false,
+            };
+            nameBox.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = nameBox.Text.Trim().Length > 0;
+            dialog.Opened += (_, _) => nameBox.Focus(FocusState.Programmatic);
+
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            // Index 0 is the invoking ref, whose label is cosmetic — send the real start point.
+            string start = startBox.SelectedIndex == 0
+                ? startPoint
+                : startBox.SelectedItem as string ?? "";
+            if (start == "HEAD")
+                start = "";
+            await Vm.CreateBranchAsync(nameBox.Text, start, checkoutBox.IsChecked == true);
+        }
+
+        /// <summary>BR-006.</summary>
+        private async Task ShowRenameBranchDialogAsync(string oldName)
+        {
+            var nameBox = new TextBox { Header = "Branch name", Text = oldName, MinWidth = 360 };
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Rename branch",
+                Content = nameBox,
+                PrimaryButtonText = "Rename",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            nameBox.TextChanged += (_, _) =>
+                dialog.IsPrimaryButtonEnabled = nameBox.Text.Trim().Length > 0;
+            dialog.Opened += (_, _) =>
+            {
+                nameBox.Focus(FocusState.Programmatic);
+                nameBox.SelectAll();
+            };
+
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary
+                && nameBox.Text.Trim() is { Length: > 0 } newName && newName != oldName)
+            {
+                await Vm.RenameBranchAsync(oldName, newName);
+            }
+        }
+
+        /// <summary>BR-005: always try the safe delete first, and only offer the forced form once
+        /// git has refused — quoting git's own reason.</summary>
+        private async Task DeleteBranchWithConfirmAsync(string name)
+        {
+            var confirm = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Delete branch",
+                Content = new TextBlock
+                {
+                    Text = $"Delete branch {name}? This cannot be undone.",
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                PrimaryButtonText = "Delete",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            string? error = await Vm.DeleteBranchAsync(name, force: false);
+            if (error == null)
+                return;
+
+            var force = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Branch not deleted",
+                Content = new TextBlock
+                {
+                    Text = $"{error}\n\nDeleting anyway discards commits that exist only on this branch.",
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                PrimaryButtonText = "Delete Anyway",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await force.ShowAsync() == ContentDialogResult.Primary)
+                await Vm.DeleteBranchAsync(name, force: true);
+        }
+
+        /// <summary>TAG-002. An empty message means a lightweight tag.</summary>
+        private async Task ShowCreateTagDialogAsync(string commitish, string atLabel)
+        {
+            if (!Vm.HasRepository)
+            {
+                await ShowMessageAsync("Create tag", "Open a repository first.");
+                return;
+            }
+
+            var nameBox = new TextBox { Header = "Tag name", PlaceholderText = "v1.0.0", MinWidth = 360 };
+            // Muted via opacity rather than a ThemeResource lookup, which does not resolve
+            // reliably through Application.Current.Resources for theme-dictionary brushes.
+            var atText = new TextBlock
+            {
+                Text = $"at {atLabel}",
+                FontSize = 12,
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.7,
+            };
+            var messageBox = new TextBox
+            {
+                Header = "Message (optional) — leave empty for a lightweight tag",
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap,
+                MinHeight = 60,
+                MaxHeight = 140,
+                MinWidth = 360,
+            };
+
+            var panel = new StackPanel { Spacing = 12, MinWidth = 360 };
+            panel.Children.Add(nameBox);
+            panel.Children.Add(atText);
+            panel.Children.Add(messageBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Create tag",
+                Content = panel,
+                PrimaryButtonText = "Create",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+                IsPrimaryButtonEnabled = false,
+            };
+            nameBox.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = nameBox.Text.Trim().Length > 0;
+            dialog.Opened += (_, _) => nameBox.Focus(FocusState.Programmatic);
+
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                await Vm.CreateTagAsync(nameBox.Text, commitish, messageBox.Text);
+        }
+
+        /// <summary>TAG-003.</summary>
+        private async Task DeleteTagWithConfirmAsync(string name)
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Delete tag",
+                Content = new TextBlock
+                {
+                    Text = $"Delete tag {name}? This removes it from this repository only; a copy "
+                         + "already pushed to a remote is unaffected.",
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                PrimaryButtonText = "Delete",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                await Vm.DeleteTagAsync(name);
         }
     }
 }
