@@ -173,6 +173,45 @@ extern "C" {
 	// This is a READ op: it decorates the compare banner rather than acting.
 	MASTERSPLINTERLOGIC_API char* MsGitAheadBehind(const char* root, const char* a, const char* b);
 
+	// ---- Remotes (Phase 6) ---------------------------------------------------------------------
+	// Same "OK" / "ERR\x1f<message>" contract as the Phase 4/5 writes. The three network commands
+	// take an optional progress callback; all of them pass --progress to git and run with
+	// GIT_TERMINAL_PROMPT=0, so a missing credential helper fails fast with a readable message
+	// instead of leaving a child process blocked on a prompt a GUI can never answer.
+
+	// Progress callback for the network commands. Called with each chunk of git's merged
+	// stdout/stderr as it arrives (`bytes`/`length`, NOT NUL-terminated — use the length), and
+	// with (NULL, 0) as a periodic heartbeat while the command runs. Return 0 to cancel: the child
+	// is terminated and the command returns ERR with whatever it had produced. Return non-zero to
+	// continue. Invoked on threads owned by this DLL, never after the originating call returns;
+	// invocations are serialized, so the callback needs no lock of its own. May be NULL.
+	typedef int (*MsGitProgressFn)(void* userData, const char* bytes, int length);
+
+	// Raw `git remote -v` output ("<name>\t<url> (fetch)" / "(push)" per line); empty on error.
+	MASTERSPLINTERLOGIC_API char* MsGitRemotes(const char* root);
+
+	// git remote set-url [--push] <name> <url>. Editing only — Phase 6 does not add or remove
+	// remotes.
+	MASTERSPLINTERLOGIC_API char* MsGitSetRemoteUrl(const char* root, const char* name,
+	                                                const char* url, bool pushUrl);
+
+	// git fetch --progress [--all | <remote>] [--prune] [--tags].
+	MASTERSPLINTERLOGIC_API char* MsGitFetch(const char* root, const char* remote, bool allRemotes,
+	                                         bool prune, bool tags,
+	                                         MsGitProgressFn cb, void* userData);
+
+	// git pull --ff-only --progress [<remote> <branch>]. Empty remote/branch pulls from the
+	// current branch's configured upstream. Deliberately fast-forward only: a diverged branch
+	// gets git's refusal rather than an unrequested merge or rebase.
+	MASTERSPLINTERLOGIC_API char* MsGitPull(const char* root, const char* remote, const char* branch,
+	                                        MsGitProgressFn cb, void* userData);
+
+	// git push --progress [--set-upstream] [--tags] <remote> <branch>. setUpstream is what
+	// publishes a new branch with tracking. Never forced.
+	MASTERSPLINTERLOGIC_API char* MsGitPush(const char* root, const char* remote, const char* branch,
+	                                        bool setUpstream, bool pushTags,
+	                                        MsGitProgressFn cb, void* userData);
+
 	// Frees any char* returned by the MsGit* functions above.
 	MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr);
 }

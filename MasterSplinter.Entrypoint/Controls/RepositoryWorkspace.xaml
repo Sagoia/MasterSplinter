@@ -247,6 +247,7 @@
                             <MenuFlyoutSeparator Tag="sep" />
                             <MenuFlyoutItem Tag="deletebranch" Text="Delete Branch…" Click="SidebarDeleteBranch_Click" />
                             <MenuFlyoutItem Tag="deletetag" Text="Delete Tag…" Click="SidebarDeleteTag_Click" />
+                            <MenuFlyoutItem Tag="editremote" Text="Edit Remote URL…" Click="SidebarEditRemote_Click" />
                             <MenuFlyoutItem Tag="copyname" Text="Copy Ref Name" Click="SidebarCopyRefName_Click" />
                         </MenuFlyout>
                     </Grid.ContextFlyout>
@@ -348,9 +349,12 @@
 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                     <ctl:ToolButton Glyph="&#xE73E;" Label="Commit" Click="CommitToolbar_Click" />
-                    <ctl:ToolButton Glyph="&#xE898;" Label="Push" />
-                    <ctl:ToolButton Glyph="&#xE896;" Label="Pull" />
-                    <ctl:ToolButton Glyph="&#xE895;" Label="Fetch" />
+                    <ctl:ToolButton Glyph="&#xE898;" Label="Push" Click="PushToolbar_Click"
+                                    IsEnabled="{Binding CanPush}" />
+                    <ctl:ToolButton Glyph="&#xE896;" Label="Pull" Click="PullToolbar_Click"
+                                    IsEnabled="{Binding CanPull}" />
+                    <ctl:ToolButton Glyph="&#xE895;" Label="Fetch" Click="FetchToolbar_Click"
+                                    IsEnabled="{Binding CanFetch}" />
                     <Rectangle Width="1" Height="38" Fill="{ThemeResource DividerBrush}" Margin="6,0" />
                     <ctl:ToolButton Vector="branch" Label="Branch" Click="BranchToolbar_Click" />
                     <ctl:ToolButton Vector="merge" Label="Merge" IsEnabled="False" />
@@ -428,6 +432,15 @@
                                     <TextBlock Text="{Binding Repository.Branch}" FontSize="11"
                                                Foreground="{ThemeResource BadgeLocalFg}" VerticalAlignment="Center" />
                                 </StackPanel>
+                            </Border>
+                            <!-- REMOTE-003: divergence from this branch's upstream ("↑2 ↓1" / "gone").
+                                 Hidden entirely when in sync or when there is no upstream. -->
+                            <Border Background="{ThemeResource BadgeRemoteBg}" BorderBrush="{ThemeResource BadgeBorderBrush}"
+                                    BorderThickness="1" CornerRadius="4" Padding="6,1" Height="20" VerticalAlignment="Center"
+                                    ToolTipService.ToolTip="{Binding UpstreamName}"
+                                    Visibility="{Binding HasHeaderTrack, Converter={StaticResource BoolToVis}}">
+                                <TextBlock Text="{Binding HeaderTrackText}" FontSize="11"
+                                           Foreground="{ThemeResource BadgeRemoteFg}" VerticalAlignment="Center" />
                             </Border>
                             <Rectangle Width="1" Height="20" Fill="{ThemeResource DividerBrush}" Margin="4,0" />
                             <TextBlock Text="Order:" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" FontSize="12" />

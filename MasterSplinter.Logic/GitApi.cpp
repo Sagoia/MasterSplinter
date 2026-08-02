@@ -12,6 +12,7 @@
 #include "Git/GitBackend.h"
 #include "Platform/IPlatformFactory.h"
 
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -59,6 +60,19 @@ namespace
             start = end + 1;
         }
         return result;
+    }
+
+    // Adapt the C-ABI progress callback to the backend's std::function sink. A null callback
+    // yields an empty sink, which the runner reads as "buffer only" — so passing NULL from the
+    // host costs nothing. The length is passed through explicitly: progress chunks are arbitrary
+    // byte runs, not NUL-terminated strings.
+    ms::GitBackend::ProgressSink MakeSink(MsGitProgressFn cb, void* userData)
+    {
+        if (!cb)
+            return {};
+        return [cb, userData](const char* bytes, std::size_t length) {
+            return cb(userData, bytes, static_cast<int>(length)) != 0;
+        };
     }
 
     // Heap copy the caller frees via MsGitFree (allocated inside this DLL, freed inside it).
@@ -245,6 +259,43 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitDeleteTag(const char* root, const 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitAheadBehind(const char* root, const char* a, const char* b)
 {
     return DupString(Backend().AheadBehind(Str(root), Str(a), Str(b)));
+}
+
+// ---- Remotes (Phase 6) ---------------------------------------------------------------------
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRemotes(const char* root)
+{
+    return DupString(Backend().Remotes(Str(root)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitSetRemoteUrl(const char* root, const char* name,
+                                                           const char* url, bool pushUrl)
+{
+    return DupString(Backend().SetRemoteUrl(Str(root), Str(name), Str(url), pushUrl));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitFetch(const char* root, const char* remote,
+                                                    bool allRemotes, bool prune, bool tags,
+                                                    MsGitProgressFn cb, void* userData)
+{
+    return DupString(Backend().Fetch(Str(root), Str(remote), allRemotes, prune, tags,
+                                     MakeSink(cb, userData)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitPull(const char* root, const char* remote,
+                                                   const char* branch,
+                                                   MsGitProgressFn cb, void* userData)
+{
+    return DupString(Backend().Pull(Str(root), Str(remote), Str(branch), MakeSink(cb, userData)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitPush(const char* root, const char* remote,
+                                                   const char* branch, bool setUpstream,
+                                                   bool pushTags,
+                                                   MsGitProgressFn cb, void* userData)
+{
+    return DupString(Backend().Push(Str(root), Str(remote), Str(branch), setUpstream, pushTags,
+                                    MakeSink(cb, userData)));
 }
 
 extern "C" MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr)

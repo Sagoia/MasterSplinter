@@ -1026,6 +1026,271 @@ TEST(AheadBehind, EmptyRefsReturnEmptyWithoutCallingGit)
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
+// ---- Remotes (Phase 6, REMOTE-001..009) --------------------------------------------------------
+
+namespace
+{
+    // A sink that records what the runner streamed and can be told to cancel. Mirrors what the
+    // host does: accumulate chunks, decide on each callback whether to keep going.
+    struct RecordingSink
+    {
+        std::string received;
+        int calls = 0;
+        int heartbeats = 0;
+        bool cancelAfterFirstCall = false;
+
+        ms::GitBackend::ProgressSink Get()
+        {
+            return [this](const char* bytes, std::size_t length) {
+                ++calls;
+                if (length == 0)
+                    ++heartbeats;
+                else
+                    received.append(bytes, length);
+                return !cancelAfterFirstCall;
+            };
+        }
+    };
+}
+
+TEST(Remotes, BuildsRemoteDashVArgs)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("origin\thttps://example.test/r.git (fetch)\n"
+                        "origin\thttps://example.test/r.git (push)\n", 0);
+    // Returned verbatim: pairing the (fetch)/(push) lines is parsing, which lives in the host.
+    EXPECT_EQ(h.backend->Remotes("root"),
+              "origin\thttps://example.test/r.git (fetch)\n"
+              "origin\thttps://example.test/r.git (push)\n");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "remote", "-v" }));
+}
+
+TEST(Remotes, EmptyOnGitErrorOrBlankRoot)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: not a git repository\n", 128);
+    EXPECT_EQ(h.backend->Remotes("root"), "");
+    EXPECT_EQ(h.backend->Remotes(""), "");
+    EXPECT_EQ(h.fake->CallCount(), 1u); // the blank root never reached git
+}
+
+TEST(SetRemoteUrl, BuildsFetchUrlArgs)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->SetRemoteUrl("root", "origin", "https://example.test/r.git", false), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "remote", "set-url", "origin", "https://example.test/r.git" }));
+}
+
+TEST(SetRemoteUrl, PushUrlAddsDashDashPush)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->SetRemoteUrl("root", "origin", "https://example.test/r.git", true), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "remote", "set-url", "--push", "origin",
+                     "https://example.test/r.git" }));
+}
+
+TEST(SetRemoteUrl, BlankArgsReturnErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->SetRemoteUrl("", "origin", "u", false),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.backend->SetRemoteUrl("root", " ", "u", false),
+              "ERR" + US + "No remote name was provided");
+    EXPECT_EQ(h.backend->SetRemoteUrl("root", "origin", " \t", false),
+              "ERR" + US + "No URL was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(SetRemoteUrl, ErrOnFailure)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("error: No such remote 'upstream'\n", 2);
+    EXPECT_EQ(h.backend->SetRemoteUrl("root", "upstream", "u", false),
+              "ERR" + US + "error: No such remote 'upstream'");
+}
+
+TEST(Fetch, BuildsPlainFetchArgs)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Fetch("root", "origin", false, false, false, {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "fetch", "--progress", "origin" }));
+}
+
+TEST(Fetch, AllRemotesReplacesTheRemoteName)
+{
+    auto h = MakeHarness();
+    // --all and a remote name are mutually exclusive to git; --all wins and the name is dropped.
+    EXPECT_EQ(h.backend->Fetch("root", "origin", true, false, false, {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "fetch", "--progress", "--all" }));
+}
+
+TEST(Fetch, PruneAndTagsAreOptIn)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Fetch("root", "origin", false, true, true, {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "fetch", "--progress", "origin", "--prune", "--tags" }));
+}
+
+TEST(Fetch, BlankRemoteReturnsErrUnlessAllRemotes)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Fetch("root", " ", false, false, false, {}),
+              "ERR" + US + "No remote was provided");
+    EXPECT_EQ(h.backend->Fetch("", "origin", false, false, false, {}),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+    // --all needs no remote name.
+    EXPECT_EQ(h.backend->Fetch("root", "", true, false, false, {}), "OK");
+    EXPECT_EQ(h.fake->CallCount(), 1u);
+}
+
+TEST(Pull, IsAlwaysFastForwardOnly)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Pull("root", "origin", "main", {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "pull", "--ff-only", "--progress", "origin", "main" }));
+    // REMOTE-004 is fast-forward only by design: nothing may quietly merge or rebase.
+    EXPECT_FALSE(h.fake->ArgsContain(0, "--rebase"));
+    EXPECT_FALSE(h.fake->ArgsContain(0, "--no-ff"));
+}
+
+TEST(Pull, OmitsRemoteAndBranchWhenEitherIsBlank)
+{
+    auto h = MakeHarness();
+    // Bare `git pull --ff-only` uses the branch's configured upstream, which is what an
+    // unconfigured caller wants. A half-specified pair would be a git usage error.
+    EXPECT_EQ(h.backend->Pull("root", "", "", {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "pull", "--ff-only", "--progress" }));
+    EXPECT_EQ(h.backend->Pull("root", "origin", "", {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(1), (Args{ "-C", "root", "pull", "--ff-only", "--progress" }));
+}
+
+TEST(Pull, ErrCarriesTheDivergedRefusal)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: Not possible to fast-forward, aborting.\n", 128);
+    EXPECT_EQ(h.backend->Pull("root", "origin", "main", {}),
+              "ERR" + US + "fatal: Not possible to fast-forward, aborting.");
+}
+
+TEST(Push, BuildsPlainPushArgs)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Push("root", "origin", "main", false, false, {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "push", "--progress", "origin", "main" }));
+}
+
+TEST(Push, SetUpstreamPublishesTheBranch)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Push("root", "origin", "feature/x", true, false, {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "push", "--progress", "--set-upstream", "origin", "feature/x" }));
+}
+
+TEST(Push, TagsAreOptIn)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Push("root", "origin", "main", false, true, {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "push", "--progress", "--tags", "origin", "main" }));
+}
+
+TEST(Push, BlankArgsReturnErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Push("", "origin", "main", false, false, {}),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.backend->Push("root", " ", "main", false, false, {}),
+              "ERR" + US + "No remote was provided");
+    EXPECT_EQ(h.backend->Push("root", "origin", "\t", false, false, {}),
+              "ERR" + US + "No branch was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Push, ErrCarriesTheRejection)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("! [rejected] main -> main (non-fast-forward)\n", 1);
+    EXPECT_EQ(h.backend->Push("root", "origin", "main", false, false, {}),
+              "ERR" + US + "! [rejected] main -> main (non-fast-forward)");
+}
+
+TEST(NetworkCommands, NeverForce)
+{
+    auto h = MakeHarness();
+    h.backend->Fetch("root", "origin", false, true, true, {});
+    h.backend->Pull("root", "origin", "main", {});
+    h.backend->Push("root", "origin", "main", true, true, {});
+    // Phase 6 deliberately ships no forced variant of any remote command: a rejected push must
+    // reach the user as git's own refusal, never be overridden behind their back.
+    for (size_t i = 0; i < h.fake->CallCount(); ++i)
+    {
+        EXPECT_FALSE(h.fake->ArgsContain(i, "--force")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "--force-with-lease")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "-f")) << "call " << i;
+    }
+}
+
+TEST(NetworkCommands, AllPassProgressAndDisableTerminalPrompts)
+{
+    auto h = MakeHarness();
+    h.backend->Fetch("root", "origin", false, false, false, {});
+    h.backend->Pull("root", "origin", "main", {});
+    h.backend->Push("root", "origin", "main", false, false, {});
+    ASSERT_EQ(h.fake->CallCount(), 3u);
+    for (size_t i = 0; i < 3; ++i)
+    {
+        // git prints no progress when stderr is not a tty, and it never is here.
+        EXPECT_TRUE(h.fake->ArgsContain(i, "--progress")) << "call " << i;
+        // Without this a GUI child can sit forever on a credential prompt nobody can answer.
+        EXPECT_EQ(h.fake->EnvOf(i, "GIT_TERMINAL_PROMPT"), std::optional<std::string>("0"))
+            << "call " << i;
+    }
+}
+
+TEST(NetworkCommands, LocalCommandsGetNoSinkAndNoEnvOverrides)
+{
+    auto h = MakeHarness();
+    h.backend->Log("root", 0, 10);
+    h.backend->Commit("root", "msg", false);
+    ASSERT_EQ(h.fake->CallCount(), 2u);
+    for (size_t i = 0; i < 2; ++i)
+    {
+        EXPECT_FALSE(h.fake->HadSink(i)) << "call " << i;
+        EXPECT_FALSE(h.fake->EnvOf(i, "GIT_TERMINAL_PROMPT").has_value()) << "call " << i;
+    }
+}
+
+TEST(NetworkCommands, StreamOutputThroughTheSink)
+{
+    auto h = MakeHarness();
+    RecordingSink sink;
+    h.fake->SetResponse("remote: Enumerating objects: 12, done.\n", 0);
+    EXPECT_EQ(h.backend->Fetch("root", "origin", false, false, false, sink.Get()), "OK");
+    EXPECT_TRUE(h.fake->HadSink(0));
+    EXPECT_EQ(sink.received, "remote: Enumerating objects: 12, done.\n");
+    // The heartbeat is what lets the host cancel a command that has gone quiet.
+    EXPECT_EQ(sink.heartbeats, 1);
+}
+
+TEST(NetworkCommands, SinkCancellationEndsTheCommandAsErr)
+{
+    auto h = MakeHarness();
+    RecordingSink sink;
+    sink.cancelAfterFirstCall = true;
+    h.fake->SetResponse("Connecting to example.test...\n", 0);
+    // A cancelled command is a failed command: the child was killed, so nothing completed.
+    EXPECT_EQ(h.backend->Push("root", "origin", "main", false, false, sink.Get()),
+              "ERR" + US + "Connecting to example.test...");
+    EXPECT_TRUE(h.fake->SinkCancelled(0));
+    EXPECT_EQ(sink.calls, 1); // no heartbeat after the cancel
+}
+
 // ---- Null runner (defensive) -------------------------------------------------------------------
 
 TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
@@ -1048,4 +1313,12 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
     EXPECT_EQ(backend.CreateTag("root", "v1", "", ""), "ERR" + US + "git tag failed");
     EXPECT_EQ(backend.DeleteTag("root", "v1"), "ERR" + US + "git tag failed");
     EXPECT_EQ(backend.AheadBehind("root", "a", "b"), "");
+    EXPECT_EQ(backend.Remotes("root"), "");
+    EXPECT_EQ(backend.SetRemoteUrl("root", "origin", "u", false),
+              "ERR" + US + "git remote set-url failed");
+    EXPECT_EQ(backend.Fetch("root", "origin", false, false, false, {}),
+              "ERR" + US + "git fetch failed");
+    EXPECT_EQ(backend.Pull("root", "origin", "main", {}), "ERR" + US + "git pull failed");
+    EXPECT_EQ(backend.Push("root", "origin", "main", false, false, {}),
+              "ERR" + US + "git push failed");
 }

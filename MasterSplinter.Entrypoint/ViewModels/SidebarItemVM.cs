@@ -54,17 +54,17 @@ namespace MasterSplinter.Entrypoint.ViewModels
         public bool IsEmphasized => IsSelected || IsCurrent;
 
         /// <summary>Upstream divergence badge: "↑2 ↓1", "gone", or empty when in sync (or when
-        /// there is no upstream, or the track text could not be parsed).</summary>
-        public string TrackText
+        /// there is no upstream, or the track text could not be parsed). Shared with the
+        /// repository header (REMOTE-003) so both read the same way.</summary>
+        public static string FormatTrack(int ahead, int behind, bool upstreamGone)
         {
-            get
-            {
-                if (UpstreamGone) return "gone";
-                if (Ahead == 0 && Behind == 0) return "";
-                if (Ahead > 0 && Behind > 0) return $"↑{Ahead} ↓{Behind}";
-                return Ahead > 0 ? $"↑{Ahead}" : $"↓{Behind}";
-            }
+            if (upstreamGone) return "gone";
+            if (ahead == 0 && behind == 0) return "";
+            if (ahead > 0 && behind > 0) return $"↑{ahead} ↓{behind}";
+            return ahead > 0 ? $"↑{ahead}" : $"↓{behind}";
         }
+
+        public string TrackText => FormatTrack(Ahead, Behind, UpstreamGone);
 
         public bool HasTrack => TrackText.Length > 0;
     }

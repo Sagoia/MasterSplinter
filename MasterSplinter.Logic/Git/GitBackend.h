@@ -12,6 +12,8 @@
 //
 // KEEP PORTABLE: no <windows.h>. Compiled with PrecompiledHeader=NotUsing.
 
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -24,6 +26,11 @@ namespace ms
     class GitBackend
     {
     public:
+        // Live progress for the long-running network commands. Receives each chunk of git's
+        // merged output plus periodic (nullptr, 0) heartbeats; returning false cancels the
+        // command. See RunOptions::onOutput — this is that sink, passed straight through.
+        using ProgressSink = std::function<bool(const char*, std::size_t)>;
+
         explicit GitBackend(std::unique_ptr<IProcessRunner> runner);
 
         // Each method corresponds 1:1 to an MsGit* C-ABI function and returns the same delimited
@@ -85,13 +92,51 @@ namespace ms
         std::string AheadBehind(const std::string& root, const std::string& a,
                                 const std::string& b) const;
 
+        // ---- Remotes (Phase 6, REMOTE-001..009) ------------------------------------------------
+
+        // Raw `git remote -v` output ("<name>\t<url> (fetch|push)" per line); parsed in the host
+        // layer, like every other read. Empty on failure.
+        std::string Remotes(const std::string& root) const;
+
+        // git remote set-url [--push] <name> <url>. Same "OK" / "ERR" US <message> contract as the
+        // other writes. The URL is NOT validated here — the caller validates before offering to
+        // save, and git rejects what it cannot use.
+        std::string SetRemoteUrl(const std::string& root, const std::string& name,
+                                 const std::string& url, bool pushUrl) const;
+
+        // The three network commands. All pass --progress (git prints none when stderr is not a
+        // tty, which it never is here) and set GIT_TERMINAL_PROMPT=0, so a missing credential
+        // helper produces a readable error instead of a child blocked on a prompt no GUI can
+        // answer. `progress` may be empty, in which case output is only buffered.
+        std::string Fetch(const std::string& root, const std::string& remote, bool allRemotes,
+                          bool prune, bool tags, const ProgressSink& progress) const;
+
+        // Deliberately --ff-only (REMOTE-004): a diverged branch gets git's own refusal rather
+        // than a merge commit or a rebase the user did not ask for. Empty remote/branch pulls
+        // from the current branch's configured upstream.
+        std::string Pull(const std::string& root, const std::string& remote,
+                         const std::string& branch, const ProgressSink& progress) const;
+
+        // setUpstream adds -u, which is what publishes a new branch with tracking (REMOTE-006).
+        // Never forced: a rejected non-fast-forward push must reach the user as git wrote it.
+        std::string Push(const std::string& root, const std::string& remote,
+                         const std::string& branch, bool setUpstream, bool pushTags,
+                         const ProgressSink& progress) const;
+
     private:
         // Run `git -C <root> <args...>`, returning the merged stdout/stderr. `code` receives git's
         // exit status (or -1 if the process could not be started). The `input` overload feeds the
-        // child's stdin (e.g. `commit -F -`).
+        // child's stdin (e.g. `commit -F -`); the `options` overload exposes the rest of the
+        // runner's knobs (environment, live output) for the network commands.
         std::string RunGitC(const std::string& root, std::vector<std::string> args, int& code) const;
         std::string RunGitC(const std::string& root, std::vector<std::string> args,
                             const std::optional<std::string>& input, int& code) const;
+        std::string RunGitC(const std::string& root, std::vector<std::string> args,
+                            RunOptions options, int& code) const;
+
+        // Shared shape of fetch/pull/push: --progress + the no-terminal-prompt environment.
+        std::string RunNetworkCommand(const std::string& root, std::vector<std::string> args,
+                                      const ProgressSink& progress, const char* fallback) const;
 
         std::unique_ptr<IProcessRunner> runner_;
     };

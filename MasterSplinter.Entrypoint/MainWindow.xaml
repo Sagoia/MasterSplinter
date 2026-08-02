@@ -80,15 +80,16 @@
                 </MenuBarItem>
                 <MenuBarItem Title="Repository">
                     <MenuFlyoutItem Text="Repository Settings…" />
-                    <MenuFlyoutItem Text="Add Remote…" />
+                    <MenuFlyoutItem Text="Remotes…" Click="ActionsRemotes_Click" />
+                    <MenuFlyoutItem Text="Add Remote…" IsEnabled="False" />
                     <MenuFlyoutSeparator />
                     <MenuFlyoutItem Text="Git Flow…" />
                 </MenuBarItem>
                 <MenuBarItem Title="Actions">
                     <MenuFlyoutItem Text="Commit…" Click="ActionsCommit_Click" />
-                    <MenuFlyoutItem Text="Push…" />
-                    <MenuFlyoutItem Text="Pull…" />
-                    <MenuFlyoutItem Text="Fetch…" />
+                    <MenuFlyoutItem Text="Push…" Click="ActionsPush_Click" />
+                    <MenuFlyoutItem Text="Pull…" Click="ActionsPull_Click" />
+                    <MenuFlyoutItem Text="Fetch…" Click="ActionsFetch_Click" />
                     <MenuFlyoutSeparator />
                     <MenuFlyoutItem Text="Branch…" Click="ActionsBranch_Click" />
                     <MenuFlyoutItem Text="Merge…" />

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -475,6 +477,7 @@ namespace MasterSplinter.Entrypoint.Controls
             bool isRemote = item.Kind == SidebarKind.RemoteBranch;
             bool isTag = item.Kind == SidebarKind.Tag;
             bool isRef = isBranch || isRemote || isTag;
+            bool isRemoteNode = item.Kind == SidebarKind.Remote; // the "origin" parent, not a branch
 
             foreach (var entry in menu.Items)
             {
@@ -489,6 +492,7 @@ namespace MasterSplinter.Entrypoint.Controls
                     "sep" => isRef,
                     "deletebranch" => isBranch && !item.IsCurrent,
                     "deletetag" => isTag,
+                    "editremote" => isRemoteNode, // REMOTE-008
                     "copyname" => isRef,
                     _ => true,
                 };
@@ -828,6 +832,431 @@ namespace MasterSplinter.Entrypoint.Controls
 
             if (await dialog.ShowAsync() == ContentDialogResult.Primary)
                 await Vm.CreateTagAsync(nameBox.Text, commitish, messageBox.Text);
+        }
+
+        // ---- Remotes (Phase 6, REMOTE-001..009) ------------------------------------------------
+
+        /// <summary>REMOTE-002. Picks a remote (or all of them), then runs the fetch behind the
+        /// progress dialog.</summary>
+        public async Task ShowFetchDialogAsync()
+        {
+            IReadOnlyList<RemoteInfo> remotes = await RequireRemotesAsync("Fetch");
+            if (remotes.Count == 0)
+                return;
+
+            var remoteBox = new ComboBox
+            {
+                Header = "Remote",
+                ItemsSource = remotes.Select(r => r.Name).ToList(),
+                SelectedIndex = 0,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            var allBox = new CheckBox { Content = "Fetch from all remotes" };
+            // Both default off, matching git's own defaults — pruning silently deleting local
+            // remote-tracking refs should be a decision, not a surprise.
+            var pruneBox = new CheckBox { Content = "Prune deleted remote branches" };
+            var tagsBox = new CheckBox { Content = "Fetch all tags" };
+            allBox.Checked += (_, _) => remoteBox.IsEnabled = false;
+            allBox.Unchecked += (_, _) => remoteBox.IsEnabled = true;
+
+            var panel = new StackPanel { Spacing = 12, MinWidth = 360 };
+            panel.Children.Add(remoteBox);
+            panel.Children.Add(allBox);
+            panel.Children.Add(pruneBox);
+            panel.Children.Add(tagsBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Fetch",
+                Content = panel,
+                PrimaryButtonText = "Fetch",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            bool all = allBox.IsChecked == true;
+            string remote = remoteBox.SelectedItem as string ?? "";
+            bool prune = pruneBox.IsChecked == true;
+            bool tags = tagsBox.IsChecked == true;
+
+            await RemoteProgressDialog.RunAsync(
+                XamlRoot, "Fetch",
+                "git fetch --progress " + (all ? "--all" : remote)
+                    + (prune ? " --prune" : "") + (tags ? " --tags" : ""),
+                (progress, token) => Vm.FetchAsync(remote, all, prune, tags, progress, token));
+        }
+
+        /// <summary>REMOTE-004. Warns about uncommitted changes first, then fast-forwards.</summary>
+        public async Task PullAsync()
+        {
+            if (!Vm.CanPull)
+            {
+                await ShowMessageAsync("Pull", "Check out a branch first — a detached HEAD has no "
+                                             + "upstream to pull from.");
+                return;
+            }
+            if (!Vm.HasUpstream)
+            {
+                await ShowMessageAsync("Pull",
+                    $"{Vm.CurrentBranchName} has no upstream branch yet. Push it with "
+                    + "“Set upstream” checked to publish it, then pull.");
+                return;
+            }
+
+            // REMOTE-004: a dirty tree is where a pull goes wrong, so say so before running it.
+            // Untracked files count here even though they are excluded from the branch-switch
+            // warning: a switch is never blocked by them, but a fast-forward is, whenever an
+            // incoming commit adds a path one of them already occupies. Ignored files are not
+            // untracked as far as `git status` is concerned, so this does not fire on build output.
+            var (tracked, untracked) = await Vm.CountWorkingTreeAsync();
+            if (tracked > 0 || untracked > 0)
+            {
+                var warn = new ContentDialog
+                {
+                    XamlRoot = XamlRoot,
+                    Title = "Pull",
+                    Content = new TextBlock
+                    {
+                        Text = DirtyTreeWarning(tracked, untracked, Vm.CurrentBranchName),
+                        TextWrapping = TextWrapping.Wrap,
+                    },
+                    PrimaryButtonText = "Pull Anyway",
+                    CloseButtonText = "Cancel",
+                    DefaultButton = ContentDialogButton.Close,
+                };
+                if (await warn.ShowAsync() != ContentDialogResult.Primary)
+                    return;
+            }
+
+            await RemoteProgressDialog.RunAsync(
+                XamlRoot, "Pull",
+                $"git pull --ff-only --progress {Vm.UpstreamRemote} {Vm.UpstreamBranch}".TrimEnd(),
+                (progress, token) => Vm.PullAsync(progress, token));
+        }
+
+        /// <summary>Names what is actually in the way, and gives each kind the remedy git will ask
+        /// for: tracked edits get committed or stashed, untracked files get moved out of the way.
+        /// Saying "uncommitted changes" for an untracked file sends the user looking for something
+        /// to commit that does not exist.</summary>
+        private static string DirtyTreeWarning(int tracked, int untracked, string branch)
+        {
+            string what = (tracked, untracked) switch
+            {
+                ( > 0, > 0) => $"You have {Count(tracked, "uncommitted change")} and "
+                             + $"{Count(untracked, "untracked file")}.",
+                ( > 0, _) => $"You have {Count(tracked, "uncommitted change")}.",
+                _ => $"You have {Count(untracked, "untracked file")}.",
+            };
+
+            string risk = tracked > 0
+                ? $"Git will refuse to fast-forward {branch} if the incoming commits change the "
+                  + "same files"
+                : $"Git will refuse to fast-forward {branch} if the incoming commits add a file "
+                  + "where one of yours already sits";
+            if (tracked > 0 && untracked > 0)
+                risk += ", or add a file where one of your untracked files already sits";
+
+            string fix = (tracked, untracked) switch
+            {
+                ( > 0, > 0) => "Commit or stash your changes, and move the untracked files aside, "
+                             + "if you would rather be safe.",
+                ( > 0, _) => "Commit or stash first if you would rather be safe.",
+                _ => "Move or delete them first if you would rather be safe.",
+            };
+
+            return $"{what} {risk}. {fix}";
+        }
+
+        private static string Count(int n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
+
+        /// <summary>REMOTE-005, and REMOTE-006 when the branch has no upstream yet.</summary>
+        public async Task ShowPushDialogAsync()
+        {
+            if (!Vm.CanPush)
+            {
+                await ShowMessageAsync("Push", "Check out a branch first — a detached HEAD has "
+                                             + "nothing to push.");
+                return;
+            }
+            IReadOnlyList<RemoteInfo> remotes = await RequireRemotesAsync("Push");
+            if (remotes.Count == 0)
+                return;
+
+            string branch = Vm.CurrentBranchName;
+            bool publishing = !Vm.HasUpstream;
+
+            var names = remotes.Select(r => r.Name).ToList();
+            int preselected = publishing ? 0 : Math.Max(0, names.IndexOf(Vm.UpstreamRemote));
+            var remoteBox = new ComboBox
+            {
+                Header = "Remote",
+                ItemsSource = names,
+                SelectedIndex = preselected,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            var branchText = new TextBlock
+            {
+                Text = publishing
+                    ? $"Publishing {branch} — it has no upstream yet."
+                    : $"Pushing {branch} to {Vm.UpstreamName}.",
+                TextWrapping = TextWrapping.Wrap,
+                // Muted via opacity rather than a ThemeResource lookup, which does not resolve
+                // reliably through Application.Current.Resources for theme-dictionary brushes.
+                Opacity = 0.7,
+                FontSize = 12,
+            };
+            // REMOTE-006: tracking is the point of publishing, so it is pre-checked exactly then.
+            var upstreamBox = new CheckBox
+            {
+                Content = "Set upstream (track this remote branch)",
+                IsChecked = publishing,
+            };
+            var tagsBox = new CheckBox { Content = "Push tags" };
+
+            var panel = new StackPanel { Spacing = 12, MinWidth = 380 };
+            panel.Children.Add(remoteBox);
+            panel.Children.Add(branchText);
+            panel.Children.Add(upstreamBox);
+            panel.Children.Add(tagsBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = publishing ? "Publish branch" : "Push",
+                Content = panel,
+                PrimaryButtonText = publishing ? "Publish" : "Push",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            string remote = remoteBox.SelectedItem as string ?? "";
+            bool setUpstream = upstreamBox.IsChecked == true;
+            bool pushTags = tagsBox.IsChecked == true;
+
+            await RemoteProgressDialog.RunAsync(
+                XamlRoot, publishing ? "Publish branch" : "Push",
+                "git push --progress" + (setUpstream ? " --set-upstream" : "")
+                    + (pushTags ? " --tags" : "") + $" {remote} {branch}",
+                (progress, token) => Vm.PushAsync(remote, branch, setUpstream, pushTags, progress, token));
+        }
+
+        /// <summary>REMOTE-001 / REMOTE-008: list every remote's URLs, and edit one in place.</summary>
+        public async Task ShowRemotesDialogAsync()
+        {
+            if (!Vm.HasRepository)
+            {
+                await ShowMessageAsync("Remotes", "Open a repository first.");
+                return;
+            }
+
+            IReadOnlyList<RemoteInfo> remotes = await Vm.ListRemotesAsync();
+            var panel = new StackPanel { Spacing = 12, MinWidth = 460 };
+            if (remotes.Count == 0)
+            {
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "This repository has no remotes configured.",
+                    TextWrapping = TextWrapping.Wrap,
+                });
+            }
+            foreach (RemoteInfo remote in remotes)
+            {
+                var block = new StackPanel { Spacing = 2 };
+                block.Children.Add(new TextBlock { Text = remote.Name, FontWeight = FontWeights.SemiBold });
+                block.Children.Add(new TextBlock
+                {
+                    Text = remote.FetchUrl,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontFamily = new FontFamily("Consolas"),
+                    FontSize = 12,
+                    Opacity = 0.8,
+                });
+                if (remote.HasSeparatePushUrl)
+                {
+                    block.Children.Add(new TextBlock
+                    {
+                        Text = "push: " + remote.PushUrl,
+                        TextWrapping = TextWrapping.Wrap,
+                        FontFamily = new FontFamily("Consolas"),
+                        FontSize = 12,
+                        Opacity = 0.8,
+                    });
+                }
+                var edit = new HyperlinkButton { Content = "Edit URL…", Padding = new Thickness(0, 2, 0, 0) };
+                RemoteInfo captured = remote;
+                edit.Click += async (_, _) =>
+                {
+                    // One editor at a time: close the list, edit, then reopen it so the change is
+                    // visible without rebuilding the panel in place.
+                    listDialog?.Hide();
+                    if (await ShowEditRemoteUrlDialogAsync(captured))
+                        await ShowRemotesDialogAsync();
+                };
+                block.Children.Add(edit);
+                panel.Children.Add(block);
+            }
+
+            listDialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Remotes",
+                Content = new ScrollViewer { Content = panel, MaxHeight = 440 },
+                CloseButtonText = "Close",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await listDialog.ShowAsync();
+            listDialog = null;
+        }
+
+        // Held so the "Edit URL…" link inside the list can dismiss the list it lives in.
+        private ContentDialog? listDialog;
+
+        /// <summary>REMOTE-008. Validates before saving, so an obviously-broken URL never reaches
+        /// git config.</summary>
+        private async Task<bool> ShowEditRemoteUrlDialogAsync(RemoteInfo remote)
+        {
+            var urlBox = new TextBox
+            {
+                Header = $"Fetch URL for {remote.Name}",
+                Text = remote.FetchUrl,
+                MinWidth = 440,
+            };
+            var error = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 12,
+                Visibility = Visibility.Collapsed,
+                Foreground = new SolidColorBrush(Microsoft.UI.Colors.OrangeRed),
+            };
+            var alsoPushBox = new CheckBox
+            {
+                Content = "Also update the push URL",
+                IsChecked = remote.HasSeparatePushUrl,
+                // Only meaningful when a distinct push URL exists; otherwise push follows fetch.
+                Visibility = remote.HasSeparatePushUrl ? Visibility.Visible : Visibility.Collapsed,
+            };
+
+            var panel = new StackPanel { Spacing = 8, MinWidth = 440 };
+            panel.Children.Add(urlBox);
+            panel.Children.Add(error);
+            panel.Children.Add(alsoPushBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Edit remote URL",
+                Content = panel,
+                PrimaryButtonText = "Save",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            dialog.Opened += (_, _) => { urlBox.Focus(FocusState.Programmatic); urlBox.SelectAll(); };
+
+            // Validate on the way out rather than disabling Save: the user gets told what is
+            // wrong instead of being left guessing why the button does nothing.
+            dialog.PrimaryButtonClick += (_, args) =>
+            {
+                string? problem = ValidateRemoteUrl(urlBox.Text);
+                if (problem == null)
+                    return;
+                args.Cancel = true;
+                error.Text = problem;
+                error.Visibility = Visibility.Visible;
+            };
+
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return false;
+
+            string url = urlBox.Text.Trim();
+            string? failure = await Vm.SetRemoteUrlAsync(remote.Name, url, pushUrl: false);
+            if (failure == null && alsoPushBox.IsChecked == true)
+                failure = await Vm.SetRemoteUrlAsync(remote.Name, url, pushUrl: true);
+            if (failure != null)
+            {
+                await ShowMessageAsync("Edit remote URL", failure);
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>Null when <paramref name="url"/> is a shape git can use, otherwise the reason.
+        /// Deliberately permissive: git accepts scp-style, several schemes, and bare paths, and
+        /// rejecting something git would have accepted is worse than letting git say no.</summary>
+        private static string? ValidateRemoteUrl(string url)
+        {
+            string u = (url ?? "").Trim();
+            if (u.Length == 0)
+                return "Enter a URL.";
+            if (u.Any(char.IsWhiteSpace))
+                return "A remote URL cannot contain spaces.";
+
+            // scheme://host/path — https, ssh, git, file, ftp(s)…
+            if (u.Contains("://", StringComparison.Ordinal))
+            {
+                int scheme = u.IndexOf("://", StringComparison.Ordinal);
+                if (scheme == 0)
+                    return "The URL is missing its scheme (for example https:// or ssh://).";
+                if (u.Length <= scheme + 3)
+                    return "The URL has a scheme but no host.";
+                return null;
+            }
+            // scp-style "user@host:path" — what GitHub hands out for SSH.
+            if (u.Contains(':') && u.Contains('@'))
+                return null;
+            // A local path (another clone on disk, or a bare repository) must actually exist.
+            if (Directory.Exists(u))
+                return null;
+
+            return "Enter a URL like https://host/repo.git, git@host:owner/repo.git, "
+                 + "or the path to a local repository.";
+        }
+
+        /// <summary>The repository's remotes, or an empty list after explaining why an operation
+        /// cannot run. Read fresh each time — a remote added outside the app has no refs yet, so
+        /// the sidebar is not a reliable source.</summary>
+        private async Task<IReadOnlyList<RemoteInfo>> RequireRemotesAsync(string title)
+        {
+            if (!Vm.HasRepository)
+            {
+                await ShowMessageAsync(title, "Open a repository first.");
+                return Array.Empty<RemoteInfo>();
+            }
+            IReadOnlyList<RemoteInfo> remotes = await Vm.ListRemotesAsync();
+            if (remotes.Count == 0)
+            {
+                await ShowMessageAsync(title,
+                    "This repository has no remotes configured, so there is nowhere to "
+                    + $"{title.ToLowerInvariant()}. Add one with “git remote add” and try again.");
+            }
+            return remotes;
+        }
+
+        private async void FetchToolbar_Click(object sender, RoutedEventArgs e)
+            => await ShowFetchDialogAsync();
+
+        private async void PullToolbar_Click(object sender, RoutedEventArgs e) => await PullAsync();
+
+        private async void PushToolbar_Click(object sender, RoutedEventArgs e)
+            => await ShowPushDialogAsync();
+
+        private async void SidebarEditRemote_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item == null)
+                return;
+            IReadOnlyList<RemoteInfo> remotes = await Vm.ListRemotesAsync();
+            RemoteInfo? match = remotes.FirstOrDefault(r => r.Name == item.Text);
+            if (match == null)
+            {
+                await ShowMessageAsync("Edit remote URL", $"No remote named {item.Text} was found.");
+                return;
+            }
+            await ShowEditRemoteUrlDialogAsync(match);
         }
 
         /// <summary>TAG-003.</summary>

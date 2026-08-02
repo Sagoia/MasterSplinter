@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -52,8 +53,9 @@ namespace MasterSplinter.Entrypoint.ViewModels
             get => _repository;
             private set
             {
-                if (Set(ref _repository, value))
-                    Raise(nameof(HasRepository));
+                if (!Set(ref _repository, value)) return;
+                Raise(nameof(HasRepository));
+                RaiseRemoteCommandState();
             }
         }
 
@@ -65,8 +67,9 @@ namespace MasterSplinter.Entrypoint.ViewModels
             get => _isLoading;
             private set
             {
-                if (Set(ref _isLoading, value))
-                    Raise(nameof(CanCommit));
+                if (!Set(ref _isLoading, value)) return;
+                Raise(nameof(CanCommit));
+                RaiseRemoteCommandState();
             }
         }
 
@@ -645,19 +648,25 @@ namespace MasterSplinter.Entrypoint.ViewModels
 
         /// <summary>Tracked changes that a branch switch could collide with. Untracked files never
         /// block a switch, so they are excluded from the BR-003 warning count.</summary>
-        public async Task<int> CountLocalChangesAsync()
+        public async Task<int> CountLocalChangesAsync() => (await CountWorkingTreeAsync()).Tracked;
+
+        /// <summary>Both halves of a dirty working tree, counted separately. A pull needs the
+        /// distinction that a branch switch does not: untracked files DO block a fast-forward when
+        /// an incoming commit adds the same path, and git's refusal then tells the user to move or
+        /// remove them — advice that makes no sense for a tracked edit.</summary>
+        public async Task<(int Tracked, int Untracked)> CountWorkingTreeAsync()
         {
-            if (_repo == null) return 0;
+            if (_repo == null) return (0, 0);
             GitRepository repo = _repo;
             try
             {
                 return await Task.Run(() =>
                 {
                     var st = repo.Status();
-                    return st.Staged.Count + st.Unstaged.Count;
+                    return (st.Staged.Count + st.Unstaged.Count, st.Untracked.Count);
                 });
             }
-            catch { return 0; }
+            catch { return (0, 0); }
         }
 
         /// <summary>BR-004. An empty <paramref name="startPoint"/> means HEAD.</summary>
@@ -684,6 +693,140 @@ namespace MasterSplinter.Entrypoint.ViewModels
         /// <summary>Start points offered by the create-branch dialog (BR-004): the same
         /// HEAD + branches + remotes + tags list the compare picker uses.</summary>
         public IReadOnlyList<string> StartPointOptions => _refNames;
+
+        // ---- Remotes (Phase 6, REMOTE-001..009) ------------------------------------------------
+
+        // CanFetch/CanPull/CanPush all depend on repository, loading and busy state, so every
+        // input raises the three together.
+        private void RaiseRemoteCommandState()
+        {
+            Raise(nameof(CanFetch));
+            Raise(nameof(CanPull));
+            Raise(nameof(CanPush));
+        }
+
+        private bool _isRemoteBusy;
+        /// <summary>True while a fetch/pull/push is running: the toolbar's remote buttons are
+        /// disabled so two network commands can never overlap on one repository.</summary>
+        public bool IsRemoteBusy
+        {
+            get => _isRemoteBusy;
+            private set { if (Set(ref _isRemoteBusy, value)) RaiseRemoteCommandState(); }
+        }
+
+        private string _currentBranchName = "";
+        /// <summary>The checked-out branch, or empty on a detached HEAD — which is exactly when
+        /// pull and push have nothing to act on.</summary>
+        public string CurrentBranchName
+        {
+            get => _currentBranchName;
+            private set { if (Set(ref _currentBranchName, value)) RaiseRemoteCommandState(); }
+        }
+
+        /// <summary>REMOTE-003/006: the current branch's upstream ("origin/main"), split for the
+        /// pull/push defaults. Empty when the branch has never been published.</summary>
+        private string _upstreamName = "";
+        public string UpstreamName
+        {
+            get => _upstreamName;
+            private set
+            {
+                if (!Set(ref _upstreamName, value)) return;
+                Raise(nameof(HasUpstream));
+                RaiseRemoteCommandState();
+            }
+        }
+        public bool HasUpstream => _upstreamName.Length > 0;
+
+        public string UpstreamRemote { get; private set; } = "";
+        public string UpstreamBranch { get; private set; } = "";
+
+        private string _headerTrackText = "";
+        /// <summary>REMOTE-003: "↑2 ↓1" / "gone" / "" for the repository header, formatted exactly
+        /// like the sidebar's per-branch badge.</summary>
+        public string HeaderTrackText
+        {
+            get => _headerTrackText;
+            private set { if (Set(ref _headerTrackText, value)) Raise(nameof(HasHeaderTrack)); }
+        }
+        public bool HasHeaderTrack => _headerTrackText.Length > 0;
+
+        public bool CanFetch => HasRepository && !IsRemoteBusy && !IsLoading;
+        public bool CanPull => HasRepository && !IsRemoteBusy && !IsLoading && CurrentBranchName.Length > 0;
+        public bool CanPush => HasRepository && !IsRemoteBusy && !IsLoading && CurrentBranchName.Length > 0;
+
+        /// <summary>REMOTE-001. Read on demand rather than on every refresh: a remote added
+        /// outside the app has no refs yet, so the sidebar cannot be the source of truth.</summary>
+        public async Task<IReadOnlyList<RemoteInfo>> ListRemotesAsync()
+        {
+            if (_repo == null) return Array.Empty<RemoteInfo>();
+            GitRepository repo = _repo;
+            try { return await Task.Run(() => repo.ListRemotes()); }
+            catch (Exception ex) { ErrorMessage = ex.Message; return Array.Empty<RemoteInfo>(); }
+        }
+
+        /// <summary>REMOTE-008. Returns git's error text, or null on success.</summary>
+        public async Task<string?> SetRemoteUrlAsync(string name, string url, bool pushUrl)
+        {
+            if (_repo == null) return "No repository is open.";
+            GitRepository repo = _repo;
+            try
+            {
+                string? error = await Task.Run(() => repo.SetRemoteUrl(name, url, pushUrl));
+                if (error == null)
+                    await RefreshAsync();
+                return error;
+            }
+            catch (Exception ex) { return ex.Message; }
+        }
+
+        /// <summary>Shared plumbing for fetch/pull/push. Unlike <see cref="RunRefMutationAsync"/>
+        /// this refreshes even when the command FAILED: a fetch can update some refs before
+        /// erroring on another, and a partially-applied push still moved the remote-tracking ref.
+        /// Errors are returned rather than pushed to the InfoBar — the progress dialog is already
+        /// showing the output, and duplicating a multi-paragraph hint there would be noise.</summary>
+        private async Task<string?> RunRemoteMutationAsync(Func<GitRepository, string?> operation)
+        {
+            if (_repo == null) return "No repository is open.";
+            GitRepository repo = _repo;
+            IsRemoteBusy = true;
+            try
+            {
+                string? error = await Task.Run(() => operation(repo));
+                await RefreshAsync();
+                return error;
+            }
+            catch (Exception ex) { return ex.Message; }
+            finally { IsRemoteBusy = false; }
+        }
+
+        /// <summary>REMOTE-002/007. <paramref name="progress"/> is reported from a background
+        /// thread, so it must have been created on the UI thread.</summary>
+        public Task<string?> FetchAsync(string remote, bool allRemotes, bool prune, bool tags,
+                                        IProgress<string> progress, CancellationToken token)
+            => RunRemoteMutationAsync(r => r.Fetch(remote, allRemotes, prune, tags,
+                                                   Sink(progress, token)));
+
+        /// <summary>REMOTE-004, fast-forward only, against the current branch's upstream.</summary>
+        public Task<string?> PullAsync(IProgress<string> progress, CancellationToken token)
+            => RunRemoteMutationAsync(r => r.Pull(UpstreamRemote, UpstreamBranch, Sink(progress, token)));
+
+        /// <summary>REMOTE-005/006.</summary>
+        public Task<string?> PushAsync(string remote, string branch, bool setUpstream, bool pushTags,
+                                       IProgress<string> progress, CancellationToken token)
+            => RunRemoteMutationAsync(r => r.Push(remote, branch, setUpstream, pushTags,
+                                                  Sink(progress, token)));
+
+        /// <summary>Bridges the native progress callback to an <see cref="IProgress{T}"/>. The
+        /// empty chunk is the heartbeat — it carries no text, and exists only so a command that
+        /// has gone quiet can still notice the cancellation.</summary>
+        private static Func<string, bool> Sink(IProgress<string> progress, CancellationToken token)
+            => chunk =>
+            {
+                if (chunk.Length > 0)
+                    progress.Report(chunk);
+                return !token.IsCancellationRequested;
+            };
 
         // ---- Binary / image diff (DIFF-005) ----------------------------------------------------
 
@@ -910,6 +1053,11 @@ namespace MasterSplinter.Entrypoint.ViewModels
             ChangedSummary = "";
             _refNames = new List<string>();
             Raise(nameof(CompareRefNames));
+            CurrentBranchName = "";
+            UpstreamName = "";
+            UpstreamRemote = "";
+            UpstreamBranch = "";
+            HeaderTrackText = "";
             SelectedCommit = null;
             ErrorMessage = null;
             UpdateDiffViewState();
@@ -1117,6 +1265,34 @@ namespace MasterSplinter.Entrypoint.ViewModels
             _refNames.AddRange(refs.Remotes.Select(r => $"{r.Remote}/{r.Name}"));
             _refNames.AddRange(refs.Tags.Select(t => t.Name));
             Raise(nameof(CompareRefNames));
+
+            // REMOTE-003: the header's divergence comes from the ref list we already have —
+            // %(upstream:track) is parsed per branch in ListRefs, so this costs no extra git call.
+            BranchInfo? current = refs.Branches.FirstOrDefault(b => b.IsCurrent);
+            CurrentBranchName = current?.Name ?? "";
+            UpstreamName = current?.Upstream ?? "";
+            HeaderTrackText = current == null
+                ? ""
+                : SidebarItemVM.FormatTrack(current.Ahead, current.Behind, current.UpstreamGone);
+            (UpstreamRemote, UpstreamBranch) = SplitUpstream(
+                UpstreamName, refs.Remotes.Select(r => r.Remote));
+        }
+
+        /// <summary>Splits "origin/feature/x" into ("origin", "feature/x"). Matching against the
+        /// known remote names first matters: a branch may itself contain slashes, so the first
+        /// slash is not reliably the boundary.</summary>
+        private static (string Remote, string Branch) SplitUpstream(string upstream,
+                                                                    IEnumerable<string> remoteNames)
+        {
+            if (upstream.Length == 0)
+                return ("", "");
+            foreach (string name in remoteNames.Distinct().OrderByDescending(n => n.Length))
+            {
+                if (upstream.StartsWith(name + "/", StringComparison.Ordinal))
+                    return (name, upstream[(name.Length + 1)..]);
+            }
+            int slash = upstream.IndexOf('/');
+            return slash < 0 ? ("", upstream) : (upstream[..slash], upstream[(slash + 1)..]);
         }
 
         private void BuildSidebar(GitRepository.RefList refs)

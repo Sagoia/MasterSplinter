@@ -122,6 +122,20 @@ namespace MasterSplinter.Entrypoint
         private async void ActionsBranch_Click(object sender, RoutedEventArgs e)
             => await Workspace.ShowCreateBranchDialogFromSelectionAsync();
 
+        // ---- Remotes (Phase 6) — the same entry points the toolbar buttons use ------------------
+
+        private async void ActionsFetch_Click(object sender, RoutedEventArgs e)
+            => await Workspace.ShowFetchDialogAsync();
+
+        private async void ActionsPull_Click(object sender, RoutedEventArgs e)
+            => await Workspace.PullAsync();
+
+        private async void ActionsPush_Click(object sender, RoutedEventArgs e)
+            => await Workspace.ShowPushDialogAsync();
+
+        private async void ActionsRemotes_Click(object sender, RoutedEventArgs e)
+            => await Workspace.ShowRemotesDialogAsync();
+
         // ---- Options dialog (STATUS-006: external editor command) ------------------------------
 
         private async void Options_Click(object sender, RoutedEventArgs e)

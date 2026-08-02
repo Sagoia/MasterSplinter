@@ -11,7 +11,7 @@
 // Threading/GCD: intentionally SYNCHRONOUS (blocks until git exits). Running it off the main thread is
 // the caller's concern — the Mac frontend owns any Grand Central Dispatch usage — so the Bridge's
 // contract stays identical to the Windows adapter. stdout+stderr are merged into one pipe, so a single
-// blocking read is correct and deadlock-free.
+// blocking read loop is correct and deadlock-free.
 
 #if defined(__APPLE__)
 
@@ -19,15 +19,26 @@
 
 #include "MacProcessRunner.h"
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace ms
 {
+    namespace
+    {
+        // Matches the Windows adapter: small enough that Cancel feels immediate, large enough to
+        // cost nothing.
+        constexpr auto kHeartbeatInterval = std::chrono::milliseconds(250);
+    }
+
     bool MacProcessRunner::Run(const std::string& executable,
                                const std::vector<std::string>& args,
-                               const std::optional<std::string>& input,
+                               const RunOptions& options,
                                std::string& out,
                                int& exitCode) const
     {
@@ -48,6 +59,23 @@ namespace ms
                 [argv addObject:[NSString stringWithUTF8String:a.c_str()]];
             task.arguments = argv;
 
+            // Environment: inherit ours, then apply the caller's overrides. Leaving
+            // task.environment nil would also inherit, but only wholesale — there would be no
+            // way to add GIT_TERMINAL_PROMPT=0 for the network commands.
+            if (!options.env.empty())
+            {
+                NSMutableDictionary<NSString*, NSString*>* env =
+                    [[[NSProcessInfo processInfo] environment] mutableCopy];
+                for (const auto& kv : options.env)
+                {
+                    if (kv.first.empty())
+                        continue;
+                    env[[NSString stringWithUTF8String:kv.first.c_str()]] =
+                        [NSString stringWithUTF8String:kv.second.c_str()];
+                }
+                task.environment = env;
+            }
+
             // Merge stdout + stderr into one pipe (same contract as the Windows runner).
             NSPipe* pipe = [NSPipe pipe];
             task.standardOutput = pipe;
@@ -56,7 +84,7 @@ namespace ms
             // stdin: a pipe fed with `input` when supplied, otherwise the null device so the
             // child can never block waiting on input.
             NSPipe* stdinPipe = nil;
-            if (input.has_value())
+            if (options.input.has_value())
             {
                 stdinPipe = [NSPipe pipe];
                 task.standardInput = stdinPipe;
@@ -76,7 +104,8 @@ namespace ms
             // write end gives the child EOF (what `commit -F -` waits for).
             if (stdinPipe != nil)
             {
-                NSData* stdinData = [NSData dataWithBytes:input->data() length:input->size()];
+                NSData* stdinData = [NSData dataWithBytes:options.input->data()
+                                                   length:options.input->size()];
                 NSFileHandle* stdinHandle = [stdinPipe fileHandleForWriting];
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                     @try { [stdinHandle writeData:stdinData]; }
@@ -85,14 +114,66 @@ namespace ms
                 });
             }
 
-            // Drain the pipe to EOF *before* waiting, so a large diff can't fill the ~64K pipe
-            // buffer and deadlock the child. readDataToEndOfFile returns when git closes the pipe.
-            NSData* data = [[pipe fileHandleForReading] readDataToEndOfFile];
-            [task waitUntilExit];
+            // The sink may be reached from both this thread and the heartbeat thread, so the
+            // interface's "invocations are serialized" promise is kept here, once.
+            std::mutex sinkMutex;
+            std::atomic<bool> cancelled{ false };
+            std::atomic<bool> childExited{ false };
 
-            // NSData length is authoritative: binary-safe, embedded NULs preserved (image bytes).
-            if (data.length > 0)
-                out.assign(static_cast<const char*>(data.bytes), data.length);
+            auto invokeSink = [&](const char* data, std::size_t length) {
+                if (!options.onOutput)
+                    return true;
+                std::lock_guard<std::mutex> lock(sinkMutex);
+                return options.onOutput(data, length);
+            };
+            auto requestCancel = [&] {
+                if (!cancelled.exchange(true))
+                    [task terminate];
+            };
+
+            // Heartbeat: gives the sink a chance to cancel a command that has stalled without
+            // printing anything (a hung SSH handshake prints nothing at all).
+            std::thread heartbeat;
+            if (options.onOutput)
+            {
+                heartbeat = std::thread([&] {
+                    while (!childExited.load(std::memory_order_acquire))
+                    {
+                        for (int i = 0; i < 5 && !childExited.load(std::memory_order_acquire); ++i)
+                            std::this_thread::sleep_for(kHeartbeatInterval / 5);
+                        if (childExited.load(std::memory_order_acquire))
+                            break;
+                        if (!invokeSink(nullptr, 0))
+                        {
+                            requestCancel();
+                            break;
+                        }
+                    }
+                });
+            }
+
+            // Drain the pipe to EOF *before* waiting, so a large diff can't fill the ~64K pipe
+            // buffer and deadlock the child. -availableData blocks until bytes arrive and returns
+            // an empty NSData at EOF, which is what ends the loop.
+            NSFileHandle* reader = [pipe fileHandleForReading];
+            for (;;)
+            {
+                NSData* chunk = nil;
+                @try { chunk = [reader availableData]; }
+                @catch (NSException*) { break; } // pipe torn down (e.g. by terminate)
+                if (chunk.length == 0)
+                    break;
+                // NSData length is authoritative: binary-safe, embedded NULs preserved (image bytes).
+                out.append(static_cast<const char*>(chunk.bytes), chunk.length);
+                if (!invokeSink(static_cast<const char*>(chunk.bytes), chunk.length))
+                    requestCancel();
+            }
+
+            childExited.store(true, std::memory_order_release);
+            if (heartbeat.joinable())
+                heartbeat.join();
+
+            [task waitUntilExit];
 
             // POSIX exit-code semantics: a signal-terminated child reports 128 + signal (shell
             // convention); a normal exit reports its status directly.

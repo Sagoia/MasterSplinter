@@ -149,6 +149,17 @@ namespace MasterSplinter.Entrypoint.Models
     /// the part below the remote ("feature/x" for origin/feature/x).</summary>
     public sealed record RemoteBranchInfo(string RefName, string Remote, string Name, string Sha);
 
+    // ---- Remotes (Phase 6, REMOTE-001/008) ------------------------------------------------------
+
+    /// <summary>A configured remote. <see cref="PushUrl"/> equals <see cref="FetchUrl"/> unless a
+    /// separate push URL was configured, which is how `git remote -v` reports it.</summary>
+    public sealed record RemoteInfo(string Name, string FetchUrl, string PushUrl)
+    {
+        /// <summary>True when the remote pushes somewhere other than it fetches — worth showing
+        /// separately, and rare enough that hiding it otherwise keeps the dialog quiet.</summary>
+        public bool HasSeparatePushUrl => PushUrl.Length > 0 && PushUrl != FetchUrl;
+    }
+
     // ---- Changed files & diff -------------------------------------------------------------------
 
     public enum FileChangeStatus { Added, Modified, Deleted, Renamed, Untracked }

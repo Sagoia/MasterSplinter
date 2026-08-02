@@ -6,8 +6,10 @@
 // built — so tests can assert the command, and (b) returns SCRIPTED (out, exitCode) responses so
 // tests can feed "what git would have printed" without any process or repository.
 
+#include <cstddef>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Platform/IProcessRunner.h"
@@ -22,6 +24,9 @@ namespace mstest
             std::string executable;
             std::vector<std::string> args;
             std::optional<std::string> input; // stdin payload, nullopt for the no-stdin overload
+            std::vector<std::pair<std::string, std::string>> env; // RunOptions::env, as passed
+            bool hadSink = false;             // whether a live-output sink was supplied
+            bool sinkCancelled = false;       // whether that sink asked to cancel
         };
 
         struct Response
@@ -52,15 +57,21 @@ namespace mstest
             responses.push_back({ std::move(out), exitCode });
         }
 
-        using ms::IProcessRunner::Run; // keep the 4-arg convenience overload visible
+        // Exit code reported when a supplied sink asks to cancel. The real runners terminate the
+        // child, so the command always ends non-zero; 1 mirrors WindowsProcessRunner.
+        int cancelExitCode = 1;
+
+        using ms::IProcessRunner::Run; // keep the convenience overloads visible
 
         bool Run(const std::string& executable,
                  const std::vector<std::string>& args,
-                 const std::optional<std::string>& input,
+                 const ms::RunOptions& options,
                  std::string& out,
                  int& exitCode) const override
         {
-            calls.push_back({ executable, args, input });
+            calls.push_back({ executable, args, options.input, options.env,
+                              static_cast<bool>(options.onOutput), false });
+            Call& call = calls.back();
 
             if (!processStarts)
             {
@@ -80,6 +91,21 @@ namespace mstest
                 out.clear();
                 exitCode = 0;
             }
+
+            // Replay the scripted output through the sink exactly as a real runner would (one
+            // chunk, then a heartbeat), so streaming and cancellation are testable without a
+            // process. A sink that cancels ends the command non-zero, like a terminated child.
+            if (options.onOutput)
+            {
+                bool keepGoing = out.empty() || options.onOutput(out.data(), out.size());
+                if (keepGoing)
+                    keepGoing = options.onOutput(nullptr, 0); // the heartbeat
+                if (!keepGoing)
+                {
+                    call.sinkCancelled = true;
+                    exitCode = cancelExitCode;
+                }
+            }
             return true;
         }
 
@@ -87,6 +113,17 @@ namespace mstest
         size_t CallCount() const { return calls.size(); }
         const std::vector<std::string>& ArgsOf(size_t callIndex) const { return calls.at(callIndex).args; }
         const std::optional<std::string>& InputOf(size_t callIndex) const { return calls.at(callIndex).input; }
+        bool HadSink(size_t callIndex) const { return calls.at(callIndex).hadSink; }
+        bool SinkCancelled(size_t callIndex) const { return calls.at(callIndex).sinkCancelled; }
+
+        // Value of an environment override on call `callIndex`, or nullopt when it was not set.
+        std::optional<std::string> EnvOf(size_t callIndex, const std::string& name) const
+        {
+            for (const auto& kv : calls.at(callIndex).env)
+                if (kv.first == name)
+                    return kv.second;
+            return std::nullopt;
+        }
 
         // True if `flag` appears anywhere in call `callIndex`'s argv.
         bool ArgsContain(size_t callIndex, const std::string& flag) const

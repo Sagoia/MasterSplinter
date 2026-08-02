@@ -167,6 +167,49 @@ namespace MasterSplinter.Entrypoint.Interop
                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string b);
 
+        // ---- Remotes (Phase 6) --------------------------------------------------------------
+        // Same "OK" / "ERR\x1f<message>" contract. The three network commands take a progress
+        // callback; see GitFetch/GitPull/GitPush below for the managed-side wrapper.
+
+        /// <summary>
+        /// Native progress callback. <paramref name="length"/> is authoritative — the chunk is a
+        /// byte run, not a NUL-terminated string — and a length of 0 is the periodic heartbeat
+        /// that lets a stalled command still be cancelled. Return 0 to cancel, non-zero to go on.
+        /// </summary>
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int ProgressFn(IntPtr userData, IntPtr bytes, int length);
+
+        [DllImport(Dll, EntryPoint = "MsGitRemotes", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRemotes([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+
+        [DllImport(Dll, EntryPoint = "MsGitSetRemoteUrl", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitSetRemoteUrl([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
+                                                       [MarshalAs(UnmanagedType.I1)] bool pushUrl);
+
+        [DllImport(Dll, EntryPoint = "MsGitFetch", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitFetch([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string remote,
+                                                [MarshalAs(UnmanagedType.I1)] bool allRemotes,
+                                                [MarshalAs(UnmanagedType.I1)] bool prune,
+                                                [MarshalAs(UnmanagedType.I1)] bool tags,
+                                                ProgressFn? cb, IntPtr userData);
+
+        [DllImport(Dll, EntryPoint = "MsGitPull", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitPull([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                               [MarshalAs(UnmanagedType.LPUTF8Str)] string remote,
+                                               [MarshalAs(UnmanagedType.LPUTF8Str)] string branch,
+                                               ProgressFn? cb, IntPtr userData);
+
+        [DllImport(Dll, EntryPoint = "MsGitPush", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitPush([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                               [MarshalAs(UnmanagedType.LPUTF8Str)] string remote,
+                                               [MarshalAs(UnmanagedType.LPUTF8Str)] string branch,
+                                               [MarshalAs(UnmanagedType.I1)] bool setUpstream,
+                                               [MarshalAs(UnmanagedType.I1)] bool pushTags,
+                                               ProgressFn? cb, IntPtr userData);
+
         [DllImport(Dll, EntryPoint = "MsGitFree", CallingConvention = CallingConvention.Cdecl)]
         private static extern void MsGitFree(IntPtr ptr);
 
@@ -204,6 +247,47 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitCreateTag(string root, string name, string commitish, string message) => TakeString(MsGitCreateTag(root, name, commitish, message));
         public static string GitDeleteTag(string root, string name) => TakeString(MsGitDeleteTag(root, name));
         public static string GitAheadBehind(string root, string a, string b) => TakeString(MsGitAheadBehind(root, a, b));
+        public static string GitRemotes(string root) => TakeString(MsGitRemotes(root));
+        public static string GitSetRemoteUrl(string root, string name, string url, bool pushUrl)
+            => TakeString(MsGitSetRemoteUrl(root, name, url, pushUrl));
+
+        /// <summary>
+        /// Wraps a managed progress handler as a native callback for the duration of one call.
+        /// <paramref name="onOutput"/> receives each chunk of git's output (empty string for the
+        /// heartbeat) and returns false to cancel. Null means "no progress" — the native side
+        /// then just buffers, as the local commands do.
+        /// </summary>
+        private static string RunWithProgress(Func<string, bool>? onOutput,
+                                              Func<ProgressFn?, IntPtr> call)
+        {
+            if (onOutput == null)
+                return TakeString(call(null));
+
+            // The native side calls back on its own threads for as long as the P/Invoke below is
+            // on the stack. The marshalled function pointer is NOT a GC root, so the delegate is
+            // held in a local and kept alive explicitly past the call.
+            ProgressFn callback = (_, bytes, length) =>
+            {
+                string chunk = length > 0 && bytes != IntPtr.Zero
+                    ? Marshal.PtrToStringUTF8(bytes, length)
+                    : string.Empty; // length 0 => heartbeat
+                return onOutput(chunk) ? 1 : 0;
+            };
+            try { return TakeString(call(callback)); }
+            finally { GC.KeepAlive(callback); }
+        }
+
+        public static string GitFetch(string root, string remote, bool allRemotes, bool prune,
+                                      bool tags, Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitFetch(root, remote, allRemotes, prune, tags, cb, IntPtr.Zero));
+
+        public static string GitPull(string root, string remote, string branch,
+                                     Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitPull(root, remote, branch, cb, IntPtr.Zero));
+
+        public static string GitPush(string root, string remote, string branch, bool setUpstream,
+                                     bool pushTags, Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitPush(root, remote, branch, setUpstream, pushTags, cb, IntPtr.Zero));
 
         /// <summary>Raw bytes of a file at a commit/ref (binary-safe; uses an explicit length, not strlen).</summary>
         public static byte[] GitFileBytesAtCommit(string root, string sha, string path)
