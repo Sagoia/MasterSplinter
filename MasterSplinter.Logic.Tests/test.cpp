@@ -1,5 +1,8 @@
 #include "pch.h"
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,6 +35,11 @@ namespace
     const std::string REF_FMT =
         "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(objecttype)%1f"
         "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(HEAD)%1f%(symref)%1e";
+
+    // Phase 8. `stash list` and `reflog show` are both log-family walks, so these use log --pretty's
+    // "%xNN" escapes — NOT for-each-ref's "%xx" (see REF_FMT above).
+    const std::string STASH_FMT = "--format=%gd%x1f%H%x1f%h%x1f%gs%x1f%aI%x1f%an%x1e";
+    const std::string REFLOG_FMT = "--format=%gd%x1f%H%x1f%h%x1f%gs%x1f%aI%x1f%an%x1f%s%x1e";
 
     // A GitBackend wired to a FakeProcessRunner we retain a (non-owning) pointer to, so a test can
     // script responses and then inspect the recorded calls.
@@ -1258,8 +1266,14 @@ TEST(NetworkCommands, LocalCommandsGetNoSinkAndNoEnvOverrides)
     auto h = MakeHarness();
     h.backend->Log("root", 0, 10);
     h.backend->Commit("root", "msg", false);
-    ASSERT_EQ(h.fake->CallCount(), 2u);
-    for (size_t i = 0; i < 2; ++i)
+    // Phase 8: stash/blame/search/reflog are all local and fast — no streaming, no environment.
+    h.backend->StashApply("root", "");
+    h.backend->StashDrop("root", "");
+    h.backend->Blame("root", "HEAD", "a", false, "");
+    h.backend->SearchLog("root", "message", "x", "", 0, 10, true, false, false);
+    h.backend->Reflog("root", "HEAD", 10);
+    ASSERT_EQ(h.fake->CallCount(), 7u);
+    for (size_t i = 0; i < 7; ++i)
     {
         EXPECT_FALSE(h.fake->HadSink(i)) << "call " << i;
         EXPECT_FALSE(h.fake->EnvOf(i, "GIT_TERMINAL_PROMPT").has_value()) << "call " << i;
@@ -1289,6 +1303,769 @@ TEST(NetworkCommands, SinkCancellationEndsTheCommandAsErr)
               "ERR" + US + "Connecting to example.test...");
     EXPECT_TRUE(h.fake->SinkCancelled(0));
     EXPECT_EQ(sink.calls, 1); // no heartbeat after the cancel
+}
+
+// ---- Merge / rebase / cherry-pick / revert (Phase 7) -------------------------------------------
+
+TEST(Merge, BuildsPlainMergeArgs)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Merge("root", "feature", false, false, {}), "OK");
+    // --no-edit always: git would otherwise open an editor for the merge message, and a GUI child
+    // blocked on one never returns. The `--` keeps a branch named like a path from being one.
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "merge", "--no-edit", "--", "feature" }));
+}
+
+TEST(Merge, NoFastForwardAndNoCommitAreOptIn)
+{
+    auto h = MakeHarness();
+    h.backend->Merge("root", "feature", true, true, {});
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "merge", "--no-edit", "--no-ff", "--no-commit", "--", "feature" }));
+}
+
+TEST(Merge, BlankArgsReturnErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Merge("", "feature", false, false, {}),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.backend->Merge("root", "  ", false, false, {}),
+              "ERR" + US + "No branch or commit was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Merge, ConflictArrivesAsErrCarryingGitsOwnText)
+{
+    auto h = MakeHarness();
+    // A conflict is a NORMAL outcome reported through the error channel: git exits 1 and the
+    // payload is what the host shows and pattern-matches on.
+    h.fake->SetResponse("Auto-merging f.txt\nCONFLICT (content): Merge conflict in f.txt\n"
+                        "Automatic merge failed; fix conflicts and then commit the result.\n", 1);
+    EXPECT_EQ(h.backend->Merge("root", "feature", false, false, {}),
+              "ERR" + US + "Auto-merging f.txt\nCONFLICT (content): Merge conflict in f.txt\n"
+                           "Automatic merge failed; fix conflicts and then commit the result.");
+}
+
+TEST(Rebase, BuildsPlainRebaseArgs)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Rebase("root", "main", {}), "OK");
+    // No `--` (git rebase takes no separator) and no options at all: interactive, autosquash and
+    // autostash are all deliberately out of Phase 7.
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "rebase", "main" }));
+}
+
+TEST(Rebase, BlankArgsReturnErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Rebase("", "main", {}), "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.backend->Rebase("root", "\t ", {}), "ERR" + US + "No upstream branch was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(CherryPick, BuildsSingleCommitArgs)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->CherryPick("root", { "abc123" }, false, {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "cherry-pick", "--no-edit", "abc123" }));
+}
+
+TEST(CherryPick, AppliesMultipleCommitsInTheOrderGiven)
+{
+    auto h = MakeHarness();
+    // One command for the whole set, left to right: that ordering IS the feature (CHERRY-002), and
+    // it is also what leaves the rest queued in .git/sequencer when one of them conflicts.
+    h.backend->CherryPick("root", { "oldest", "middle", "newest" }, false, {});
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "cherry-pick", "--no-edit", "oldest", "middle", "newest" }));
+}
+
+TEST(CherryPick, NoCommitIsOptIn)
+{
+    auto h = MakeHarness();
+    h.backend->CherryPick("root", { "abc123" }, true, {});
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "cherry-pick", "--no-edit", "-n", "abc123" }));
+}
+
+TEST(CherryPick, BlankArgsReturnErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->CherryPick("", { "abc" }, false, {}),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.backend->CherryPick("root", {}, false, {}),
+              "ERR" + US + "No commits were provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Revert, OmitsMainlineForAnOrdinaryCommit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Revert("root", "abc123", 0, false, {}), "OK");
+    // Passing -m for a non-merge commit is an error in git, so 0 has to mean "leave it out".
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "revert", "--no-edit", "abc123" }));
+}
+
+TEST(Revert, PassesMainlineForAMergeCommit)
+{
+    auto h = MakeHarness();
+    h.backend->Revert("root", "abc123", 1, false, {});
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "revert", "--no-edit", "-m", "1", "abc123" }));
+}
+
+TEST(Revert, NoCommitIsOptIn)
+{
+    auto h = MakeHarness();
+    h.backend->Revert("root", "abc123", 2, true, {});
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "revert", "--no-edit", "-m", "2", "-n", "abc123" }));
+}
+
+TEST(Revert, BlankArgsReturnErrWithoutCallingGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Revert("", "abc", 0, false, {}),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.backend->Revert("root", " ", 0, false, {}),
+              "ERR" + US + "No commit was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(SequencerAction, BuildsTheSubcommandAndFlag)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->SequencerAction("root", "merge", "abort", {}), "OK");
+    EXPECT_EQ(h.backend->SequencerAction("root", "rebase", "continue", {}), "OK");
+    EXPECT_EQ(h.backend->SequencerAction("root", "cherry-pick", "skip", {}), "OK");
+    EXPECT_EQ(h.backend->SequencerAction("root", "revert", "abort", {}), "OK");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "merge", "--abort" }));
+    EXPECT_EQ(h.fake->ArgsOf(1), (Args{ "-C", "root", "rebase", "--continue" }));
+    EXPECT_EQ(h.fake->ArgsOf(2), (Args{ "-C", "root", "cherry-pick", "--skip" }));
+    EXPECT_EQ(h.fake->ArgsOf(3), (Args{ "-C", "root", "revert", "--abort" }));
+}
+
+TEST(SequencerAction, MergeHasNoSkip)
+{
+    auto h = MakeHarness();
+    // Verified against git 2.54: `git merge --skip` is "error: unknown option `skip'". Catching it
+    // here beats handing the user git's usage dump.
+    EXPECT_EQ(h.backend->SequencerAction("root", "merge", "skip", {}),
+              "ERR" + US + "\"skip\" is not a valid action for git merge");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(SequencerAction, RejectsAnythingOutsideTheAllowlists)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->SequencerAction("root", "push", "abort", {}),
+              "ERR" + US + "Unknown operation: push");
+    EXPECT_EQ(h.backend->SequencerAction("root", "rebase", "--exec=rm -rf /", {}),
+              "ERR" + US + "\"--exec=rm -rf /\" is not a valid action for git rebase");
+    EXPECT_EQ(h.backend->SequencerAction("root", "", "", {}),
+              "ERR" + US + "Unknown operation: ");
+    EXPECT_EQ(h.backend->SequencerAction("", "merge", "abort", {}),
+              "ERR" + US + "No repository root was provided");
+    // Nothing unrecognized ever reaches git.
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(MergeTool, BuildsNoPromptArgsWithoutAToolName)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->MergeTool("root", "src/f.txt", "", {}), "OK");
+    // A blank tool defers to the repository's merge.tool config; --no-prompt is never optional,
+    // because the prompt would go to a terminal this process does not have.
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "mergetool", "--no-prompt", "--", "src/f.txt" }));
+}
+
+TEST(MergeTool, AddsTheToolWhenNamed)
+{
+    auto h = MakeHarness();
+    h.backend->MergeTool("root", "src/f.txt", "kdiff3", {});
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "mergetool", "--no-prompt", "--tool=kdiff3", "--", "src/f.txt" }));
+}
+
+TEST(MergeTool, RejectsAToolNameThatIsNotOne)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->MergeTool("root", "f.txt", "not a tool", {}).rfind("ERR", 0), 0u);
+    EXPECT_EQ(h.backend->MergeTool("root", "f.txt", "--upload-pack=x", {}).rfind("ERR", 0), 0u);
+    EXPECT_EQ(h.backend->MergeTool("", "f.txt", "", {}),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.backend->MergeTool("root", " ", "", {}), "ERR" + US + "No file was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Phase7Commands, NeverInteractiveOrForcing)
+{
+    auto h = MakeHarness();
+    h.backend->Merge("root", "feature", true, true, {});
+    h.backend->Rebase("root", "main", {});
+    h.backend->CherryPick("root", { "abc" }, true, {});
+    h.backend->Revert("root", "abc", 1, true, {});
+    h.backend->SequencerAction("root", "rebase", "continue", {});
+    h.backend->MergeTool("root", "f.txt", "kdiff3", {});
+    ASSERT_EQ(h.fake->CallCount(), 6u);
+
+    for (size_t i = 0; i < h.fake->CallCount(); ++i)
+    {
+        // An editor the user cannot see is a hang, not a prompt. `--continue` has no --no-edit
+        // flag, so the environment is the ONLY cover for it.
+        EXPECT_EQ(h.fake->EnvOf(i, "GIT_EDITOR"), std::optional<std::string>("true")) << "call " << i;
+        EXPECT_EQ(h.fake->EnvOf(i, "GIT_SEQUENCE_EDITOR"), std::optional<std::string>("true"))
+            << "call " << i;
+        EXPECT_EQ(h.fake->EnvOf(i, "GIT_TERMINAL_PROMPT"), std::optional<std::string>("0"))
+            << "call " << i;
+
+        // Phase 7 ships no variant that rewrites more than was asked for, or that hides a step.
+        EXPECT_FALSE(h.fake->ArgsContain(i, "-i")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "--interactive")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "--squash")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "--autosquash")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "--autostash")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "--force-rebase")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "-f")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "-X")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "-Xours")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "-Xtheirs")) << "call " << i;
+    }
+}
+
+TEST(Phase7Commands, StreamOutputThroughTheSink)
+{
+    auto h = MakeHarness();
+    RecordingSink sink;
+    h.fake->SetResponse("Rebasing (1/3)\n", 0);
+    EXPECT_EQ(h.backend->Rebase("root", "main", sink.Get()), "OK");
+    EXPECT_TRUE(h.fake->HadSink(0));
+    EXPECT_EQ(sink.received, "Rebasing (1/3)\n");
+    EXPECT_EQ(sink.heartbeats, 1);
+}
+
+// ---- RepositoryState (MERGE-003 / REBASE-002) --------------------------------------------------
+
+namespace
+{
+    // A throwaway directory standing in for a .git dir. The state probe reads real files, so the
+    // tests build a real (temporary) directory — still hermetic: no git, no repository, no process.
+    class TempGitDir
+    {
+    public:
+        TempGitDir()
+        {
+            static int counter = 0;
+            path_ = std::filesystem::temp_directory_path()
+                  / ("ms-state-test-" + std::to_string(++counter) + "-"
+                     + std::to_string(static_cast<long long>(
+                           std::chrono::steady_clock::now().time_since_epoch().count())));
+            std::filesystem::create_directories(path_);
+        }
+
+        ~TempGitDir()
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(path_, ec);
+        }
+
+        TempGitDir(const TempGitDir&) = delete;
+        TempGitDir& operator=(const TempGitDir&) = delete;
+
+        std::string Path() const { return path_.generic_string(); }
+
+        void Write(const std::string& relative, const std::string& contents) const
+        {
+            std::filesystem::path file = path_ / relative;
+            std::filesystem::create_directories(file.parent_path());
+            std::ofstream out(file, std::ios::binary);
+            out << contents;
+        }
+
+    private:
+        std::filesystem::path path_;
+    };
+
+    // Fields of the OK record: state, detail, step, total, message.
+    std::vector<std::string> SplitRecord(const std::string& record)
+    {
+        std::vector<std::string> fields;
+        std::size_t start = 0;
+        while (start <= record.size())
+        {
+            std::size_t end = record.find('\x1f', start);
+            if (end == std::string::npos)
+                end = record.size();
+            fields.push_back(record.substr(start, end - start));
+            start = end + 1;
+        }
+        return fields;
+    }
+}
+
+TEST(RepositoryState, BuildsAbsoluteGitDirArgs)
+{
+    auto h = MakeHarness();
+    TempGitDir dir;
+    h.fake->SetResponse(dir.Path() + "\n", 0);
+    h.backend->RepositoryState("root");
+    // ONE spawn — the rest is reading that directory. Five rev-parse --verify calls would cost
+    // ~5x the process-launch floor on every refresh, and still could not detect a rebase.
+    ASSERT_EQ(h.fake->CallCount(), 1u);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "rev-parse", "--absolute-git-dir" }));
+}
+
+TEST(RepositoryState, CleanRepositoryReportsNone)
+{
+    auto h = MakeHarness();
+    TempGitDir dir;
+    h.fake->SetResponse(dir.Path() + "\n", 0);
+    auto f = SplitRecord(h.backend->RepositoryState("root"));
+    ASSERT_EQ(f.size(), 6u);
+    EXPECT_EQ(f[0], "OK");
+    EXPECT_EQ(f[1], "none");
+    EXPECT_EQ(f[2], "");
+    EXPECT_EQ(f[3], "0");
+    EXPECT_EQ(f[4], "0");
+    EXPECT_EQ(f[5], "");
+}
+
+TEST(RepositoryState, MergeHeadMeansMergingAndCarriesTheMessage)
+{
+    auto h = MakeHarness();
+    TempGitDir dir;
+    dir.Write("MERGE_HEAD", "1234567890abcdef1234567890abcdef12345678\n");
+    // Git's "# Conflicts:" block is an instruction to the editor, not message text — it must not
+    // reach the commit editor, which is why the backend strips it rather than the host.
+    dir.Write("MERGE_MSG", "Merge branch 'feature'\n\n# Conflicts:\n#\tf.txt\n");
+    h.fake->SetResponse(dir.Path() + "\n", 0);
+
+    auto f = SplitRecord(h.backend->RepositoryState("root"));
+    ASSERT_EQ(f.size(), 6u);
+    EXPECT_EQ(f[1], "merging");
+    EXPECT_EQ(f[2], "1234567"); // short sha, as the banner shows it
+    EXPECT_EQ(f[5], "Merge branch 'feature'");
+}
+
+TEST(RepositoryState, RebaseMergeDirectoryReportsBranchAndProgress)
+{
+    auto h = MakeHarness();
+    TempGitDir dir;
+    dir.Write("rebase-merge/head-name", "refs/heads/feature\n");
+    dir.Write("rebase-merge/msgnum", "2\n");
+    dir.Write("rebase-merge/end", "5\n");
+    h.fake->SetResponse(dir.Path() + "\n", 0);
+
+    auto f = SplitRecord(h.backend->RepositoryState("root"));
+    ASSERT_EQ(f.size(), 6u);
+    EXPECT_EQ(f[1], "rebasing");
+    EXPECT_EQ(f[2], "feature"); // refs/heads/ stripped
+    EXPECT_EQ(f[3], "2");
+    EXPECT_EQ(f[4], "5");
+}
+
+TEST(RepositoryState, RebaseApplyDirectoryUsesItsOwnFileNames)
+{
+    auto h = MakeHarness();
+    TempGitDir dir;
+    // The apply backend (`rebase --apply`, or an am-based rebase) names them next/last, not
+    // msgnum/end.
+    dir.Write("rebase-apply/head-name", "refs/heads/topic\n");
+    dir.Write("rebase-apply/next", "3\n");
+    dir.Write("rebase-apply/last", "4\n");
+    h.fake->SetResponse(dir.Path() + "\n", 0);
+
+    auto f = SplitRecord(h.backend->RepositoryState("root"));
+    EXPECT_EQ(f[1], "rebasing");
+    EXPECT_EQ(f[2], "topic");
+    EXPECT_EQ(f[3], "3");
+    EXPECT_EQ(f[4], "4");
+}
+
+TEST(RepositoryState, CherryPickAndRevertHaveTheirOwnHeads)
+{
+    {
+        auto h = MakeHarness();
+        TempGitDir dir;
+        dir.Write("CHERRY_PICK_HEAD", "abcdef1234567890\n");
+        h.fake->SetResponse(dir.Path() + "\n", 0);
+        auto f = SplitRecord(h.backend->RepositoryState("root"));
+        EXPECT_EQ(f[1], "cherry-picking");
+        EXPECT_EQ(f[2], "abcdef1");
+    }
+    {
+        auto h = MakeHarness();
+        TempGitDir dir;
+        dir.Write("REVERT_HEAD", "fedcba0987654321\n");
+        h.fake->SetResponse(dir.Path() + "\n", 0);
+        auto f = SplitRecord(h.backend->RepositoryState("root"));
+        EXPECT_EQ(f[1], "reverting");
+        EXPECT_EQ(f[2], "fedcba0");
+    }
+}
+
+TEST(RepositoryState, RebaseWinsOverAMergeHeadLeftBehind)
+{
+    auto h = MakeHarness();
+    TempGitDir dir;
+    // A rebase stopped on a conflict writes MERGE_MSG and can leave merge-ish state around; the
+    // rebase directory is the authoritative answer, and it is what carries continue/skip/abort.
+    dir.Write("rebase-merge/head-name", "refs/heads/feature\n");
+    dir.Write("rebase-merge/msgnum", "1\n");
+    dir.Write("rebase-merge/end", "1\n");
+    dir.Write("MERGE_HEAD", "1234567890abcdef\n");
+    h.fake->SetResponse(dir.Path() + "\n", 0);
+
+    auto f = SplitRecord(h.backend->RepositoryState("root"));
+    EXPECT_EQ(f[1], "rebasing");
+}
+
+TEST(RepositoryState, ErrWhenGitCannotResolveTheGitDir)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: not a git repository\n", 128);
+    EXPECT_EQ(h.backend->RepositoryState("root"),
+              "ERR" + US + "The folder is not a Git repository");
+    EXPECT_EQ(h.backend->RepositoryState(""),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.fake->CallCount(), 1u); // the blank root never reached git
+}
+
+// ---- Stash (Phase 8, STASH-001..004) -----------------------------------------------------------
+
+TEST(StashList, BuildsListArgsWithTheLogFamilyFormat)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("stash@{0}" + US + "abc" + US + "abc1234" + US + "WIP on main: x" + US
+                        + "2026-08-15T10:00:00+02:00" + US + "Ada" + RS, 0);
+    EXPECT_NE(h.backend->StashList("root"), "");
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "stash", "list", STASH_FMT }));
+}
+
+TEST(StashList, EmptyWhenThereAreNoStashesOrNoRoot)
+{
+    auto h = MakeHarness();
+    // git prints nothing and exits 0 for an empty stash: an empty list, not a failure.
+    h.fake->SetResponse("", 0);
+    EXPECT_EQ(h.backend->StashList("root"), "");
+    EXPECT_EQ(h.backend->StashList(""), "");
+    EXPECT_EQ(h.fake->CallCount(), 1u); // the blank root never reached git
+}
+
+TEST(StashList, FailureIsNotHandedToTheRecordParser)
+{
+    auto h = MakeHarness();
+    // git writes diagnostics to the same merged stream the records arrive on, so a non-zero exit
+    // has to be turned into "" here — otherwise the message is parsed as if it were stash data.
+    h.fake->SetResponse("fatal: not a git repository\n", 128);
+    EXPECT_EQ(h.backend->StashList("root"), "");
+}
+
+TEST(StashSave, ProbesRefsStashAroundThePushAndReportsSuccess)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("", 1);                              // no refs/stash yet
+    h.fake->AddResponse("Saved working directory\n", 0);     // the push
+    h.fake->AddResponse("abc123\n", 0);                      // refs/stash now exists
+    EXPECT_EQ(h.backend->StashSave("root", "wip", false, false), "OK");
+    ASSERT_EQ(h.fake->CallCount(), 3u);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "rev-parse", "--verify", "--quiet", "refs/stash" }));
+    EXPECT_EQ(h.fake->ArgsOf(1), (Args{ "-C", "root", "stash", "push", "-m", "wip" }));
+    EXPECT_EQ(h.fake->ArgsOf(2), h.fake->ArgsOf(0));
+}
+
+TEST(StashSave, CleanTreeIsAnErrorEvenThoughGitExitsZero)
+{
+    auto h = MakeHarness();
+    // The whole point of the two probes: `git stash push` succeeds on a clean tree and stashes
+    // nothing, and its "No local changes to save" text is localizable, so it cannot be matched.
+    h.fake->AddResponse("abc123\n", 0);
+    h.fake->AddResponse("No local changes to save\n", 0);
+    h.fake->AddResponse("abc123\n", 0); // refs/stash unmoved
+    EXPECT_EQ(h.backend->StashSave("root", "", false, false),
+              "ERR" + US + "There were no local changes to save.");
+    EXPECT_EQ(h.fake->CallCount(), 3u);
+}
+
+TEST(StashSave, UntrackedAndKeepIndexAreOptInAndABlankMessageOmitsDashM)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("", 1);
+    h.fake->AddResponse("", 0);
+    h.fake->AddResponse("abc\n", 0);
+    EXPECT_EQ(h.backend->StashSave("root", "   ", true, true), "OK");
+    // A blank message must not become `-m "   "` — git would store the whitespace verbatim.
+    EXPECT_EQ(h.fake->ArgsOf(1),
+              (Args{ "-C", "root", "stash", "push", "--include-untracked", "--keep-index" }));
+}
+
+TEST(StashSave, ErrCarriesGitsOwnOutputAndSkipsTheSecondProbe)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("", 1);
+    h.fake->AddResponse("error: unable to write index\n", 1);
+    EXPECT_EQ(h.backend->StashSave("root", "wip", false, false),
+              "ERR" + US + "error: unable to write index");
+    EXPECT_EQ(h.fake->CallCount(), 2u); // a failed push is not re-probed
+}
+
+TEST(StashSave, BlankRootReturnsErrWithoutSpawningGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->StashSave("", "wip", false, false),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(StashApplyPopDrop, BuildTheirArgsWithAndWithoutASelector)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->StashApply("root", "stash@{2}"), "OK");
+    EXPECT_EQ(h.backend->StashPop("root", ""), "OK");
+    EXPECT_EQ(h.backend->StashDrop("root", "stash@{10}"), "OK");
+    ASSERT_EQ(h.fake->CallCount(), 3u);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "stash", "apply", "stash@{2}" }));
+    // An omitted selector is git's own default (the most recent entry), not an error.
+    EXPECT_EQ(h.fake->ArgsOf(1), (Args{ "-C", "root", "stash", "pop" }));
+    EXPECT_EQ(h.fake->ArgsOf(2), (Args{ "-C", "root", "stash", "drop", "stash@{10}" }));
+}
+
+TEST(StashApplyPopDrop, RejectAnythingThatIsNotAStashSelectorWithoutSpawningGit)
+{
+    auto h = MakeHarness();
+    // Not ref names, not revisions: only the selector shape MsGitStashList hands back.
+    for (const std::string& bad : { "refs/stash", "stash", "stash@{}", "stash@{a}", "stash@{1}x",
+                                    "HEAD", "--force", "stash@{1", "stash{1}" })
+    {
+        EXPECT_EQ(h.backend->StashDrop("root", bad), "ERR" + US + "Not a stash entry: " + bad)
+            << "for " << bad;
+    }
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(StashApplyPopDrop, ConflictArrivesAsErrCarryingGitsText)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("CONFLICT (content): Merge conflict in a.txt\n", 1);
+    EXPECT_EQ(h.backend->StashPop("root", ""),
+              "ERR" + US + "CONFLICT (content): Merge conflict in a.txt");
+}
+
+// ---- Blame (Phase 8, BLAME-001) ----------------------------------------------------------------
+
+TEST(Blame, BuildsPorcelainArgsAndDefaultsToHead)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("abc 1 1 1\n\tline\n", 0);
+    EXPECT_EQ(h.backend->Blame("root", "", "src/a.cpp", false, ""),
+              "OK" + US + "abc 1 1 1\n\tline\n");
+    // --porcelain, not --line-porcelain: the latter repeats every header on every line.
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "-c", "core.quotePath=false", "blame", "--porcelain",
+                     "HEAD", "--", "src/a.cpp" }));
+}
+
+TEST(Blame, MoveDetectionModesMapToTheirFlags)
+{
+    auto h = MakeHarness();
+    h.backend->Blame("root", "main", "a", false, "none");
+    h.backend->Blame("root", "main", "a", false, "file");
+    h.backend->Blame("root", "main", "a", false, "commit");
+    h.backend->Blame("root", "main", "a", true, "any");
+    ASSERT_EQ(h.fake->CallCount(), 4u);
+    // Exact argv, not ArgsContain: every call already carries a "-C" (the repository root), so a
+    // containment check for the copy-detection flag would pass no matter what was built.
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "-c", "core.quotePath=false", "blame", "--porcelain",
+                     "main", "--", "a" }));
+    EXPECT_EQ(h.fake->ArgsOf(1),
+              (Args{ "-C", "root", "-c", "core.quotePath=false", "blame", "--porcelain",
+                     "-M", "main", "--", "a" }));
+    EXPECT_EQ(h.fake->ArgsOf(2),
+              (Args{ "-C", "root", "-c", "core.quotePath=false", "blame", "--porcelain",
+                     "-C", "main", "--", "a" }));
+    // "any" is -C -C (also detect copies from files the commit itself created).
+    EXPECT_EQ(h.fake->ArgsOf(3),
+              (Args{ "-C", "root", "-c", "core.quotePath=false", "blame", "--porcelain",
+                     "-w", "-C", "-C", "main", "--", "a" }));
+}
+
+TEST(Blame, RejectsBadInputWithoutSpawningGit)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->Blame("", "HEAD", "a", false, ""),
+              "ERR" + US + "No repository root was provided");
+    EXPECT_EQ(h.backend->Blame("root", "HEAD", "  ", false, ""),
+              "ERR" + US + "No file was provided");
+    // A leading '-' would be read as an option; git's --end-of-options needs 2.24, so refuse.
+    EXPECT_EQ(h.backend->Blame("root", "HEAD", "-rf", false, ""),
+              "ERR" + US + "Invalid revision or path");
+    EXPECT_EQ(h.backend->Blame("root", "--all", "a", false, ""),
+              "ERR" + US + "Invalid revision or path");
+    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a", false, "aggressive"),
+              "ERR" + US + "Unknown move detection mode: aggressive");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+TEST(Blame, BinaryFilesAreRefusedRatherThanTruncated)
+{
+    auto h = MakeHarness();
+    // A NUL anywhere in the payload would truncate the whole string at the managed marshaller,
+    // silently showing a fraction of the file as if it were all of it.
+    h.fake->SetResponse(std::string("abc 1 1 1\n\t\x00\x01binary", 21), 0);
+    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a.png", false, ""),
+              "ERR" + US + "This file is binary; blame is not available.");
+}
+
+TEST(Blame, ErrCarriesGitsOwnMessage)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("fatal: no such path 'gone.txt' in HEAD\n", 128);
+    EXPECT_EQ(h.backend->Blame("root", "HEAD", "gone.txt", false, ""),
+              "ERR" + US + "fatal: no such path 'gone.txt' in HEAD");
+}
+
+TEST(Blame, PayloadMayContainTheFieldSeparator)
+{
+    auto h = MakeHarness();
+    // The host splits on the FIRST 0x1F only; file content that happens to contain one must
+    // survive intact rather than being read as a field boundary.
+    h.fake->SetResponse("abc 1 1 1\n\tvalue" + US + "other\n", 0);
+    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a", false, ""),
+              "OK" + US + "abc 1 1 1\n\tvalue" + US + "other\n");
+}
+
+// ---- Search (Phase 8, SEARCH-001/002) ----------------------------------------------------------
+
+TEST(SearchLog, MessageModeUsesGrepAndTheSameFormatAsLog)
+{
+    auto h = MakeHarness();
+    h.backend->SearchLog("root", "message", "needle", "", 0, 50, false, false, false);
+    // FMT is the constant Log's test pins: search results feed the same positional parser, so a
+    // drift between the two would silently mis-map fields into the wrong columns.
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "log", "--parents", "--date-order", "-n50",
+                     "--fixed-strings", "--grep=needle", "--regexp-ignore-case", FMT, "--" }));
+}
+
+TEST(SearchLog, RegexAndCaseAndAllBranchesAreOptIn)
+{
+    auto h = MakeHarness();
+    h.backend->SearchLog("root", "message", "ne+dle", "", 1, 0, true, true, true);
+    const auto args = h.fake->ArgsOf(0);
+    EXPECT_TRUE(h.fake->ArgsContain(0, "--all"));
+    EXPECT_TRUE(h.fake->ArgsContain(0, "--topo-order"));
+    EXPECT_TRUE(h.fake->ArgsContain(0, "--grep=ne+dle"));
+    EXPECT_FALSE(h.fake->ArgsContain(0, "--fixed-strings"));    // useRegex
+    EXPECT_FALSE(h.fake->ArgsContain(0, "--regexp-ignore-case")); // matchCase
+    EXPECT_FALSE(AnyArgStartsWith(*h.fake, 0, "-n"));            // maxCount 0 = no limit
+}
+
+TEST(SearchLog, AuthorContentAndPathModesEachUseOnePredicate)
+{
+    auto h = MakeHarness();
+    h.backend->SearchLog("root", "author", "ada", "", 0, 10, true, false, false);
+    h.backend->SearchLog("root", "content", "malloc", "", 0, 10, true, false, false);
+    h.backend->SearchLog("root", "content", "mall.c", "", 0, 10, true, true, false);
+    h.backend->SearchLog("root", "path", "src/a.cpp", "", 0, 10, true, false, false);
+    ASSERT_EQ(h.fake->CallCount(), 4u);
+    EXPECT_TRUE(h.fake->ArgsContain(0, "--author=ada"));
+    // -S counts occurrences; -G matches the diff text itself, which is what a regex means here.
+    EXPECT_TRUE(h.fake->ArgsContain(1, "-Smalloc"));
+    EXPECT_TRUE(h.fake->ArgsContain(2, "-Gmall.c"));
+    // Path mode has no text predicate at all — the query IS the pathspec (SEARCH-002).
+    EXPECT_EQ(h.fake->ArgsOf(3),
+              (Args{ "-C", "root", "log", "--parents", "--date-order", "-n10", FMT,
+                     "--", "src/a.cpp" }));
+}
+
+TEST(SearchLog, PathFilterNarrowsAnyMode)
+{
+    auto h = MakeHarness();
+    h.backend->SearchLog("root", "message", "fix", "src/", 0, 10, true, false, false);
+    const auto args = h.fake->ArgsOf(0);
+    ASSERT_GE(args.size(), 2u);
+    EXPECT_EQ(args[args.size() - 2], "--");
+    EXPECT_EQ(args.back(), "src/");
+    EXPECT_TRUE(h.fake->ArgsContain(0, "--grep=fix"));
+}
+
+TEST(SearchLog, HashModeVerifiesTheRevisionBeforeWalking)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("abc123def\n", 0);
+    h.fake->AddResponse("abc123def" + US + "abc123d" + RS, 0);
+    EXPECT_NE(h.backend->SearchLog("root", "hash", "abc123", "", 0, 10, true, false, false), "");
+    ASSERT_EQ(h.fake->CallCount(), 2u);
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "rev-parse", "--verify", "--quiet", "abc123^{commit}" }));
+    // The resolved sha is what the walk gets, not the user's abbreviation.
+    EXPECT_EQ(h.fake->ArgsOf(1),
+              (Args{ "-C", "root", "log", "--parents", "-n1", FMT, "abc123def" }));
+}
+
+TEST(SearchLog, HashModeYieldsEmptyForAnUnknownRevision)
+{
+    auto h = MakeHarness();
+    h.fake->AddResponse("", 1);
+    // A typo must come back as "no results", never as git's error text rendered into the list.
+    EXPECT_EQ(h.backend->SearchLog("root", "hash", "nope", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(h.fake->CallCount(), 1u); // no log walk after a failed probe
+}
+
+TEST(SearchLog, RejectedPatternReadsAsNoResults)
+{
+    auto h = MakeHarness();
+    // A bad regex makes git exit non-zero; its complaint must not reach the record parser.
+    h.fake->SetResponse("fatal: invalid regex\n", 128);
+    EXPECT_EQ(h.backend->SearchLog("root", "message", "*[", "", 0, 10, true, true, false), "");
+}
+
+TEST(SearchLog, EmptyWithoutSpawningGitWhenThereIsNothingToSearchFor)
+{
+    auto h = MakeHarness();
+    EXPECT_EQ(h.backend->SearchLog("", "message", "x", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(h.backend->SearchLog("root", "subject", "x", "", 0, 10, true, false, false), "");
+    // An unfiltered walk here would look like a search that happened to match everything.
+    EXPECT_EQ(h.backend->SearchLog("root", "message", "  ", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(h.backend->SearchLog("root", "hash", "", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(h.backend->SearchLog("root", "hash", "-rf", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(h.fake->CallCount(), 0u);
+}
+
+// ---- Reflog (Phase 8, REFLOG-001) --------------------------------------------------------------
+
+TEST(Reflog, BuildsShowArgsAndDefaultsToHead)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("HEAD@{0}" + US + "abc" + US + "abc1234" + US + "commit: x" + US
+                        + "2026-08-15T10:00:00+02:00" + US + "Ada" + US + "x" + RS, 0);
+    EXPECT_NE(h.backend->Reflog("root", "", 25), "");
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "reflog", "show", REFLOG_FMT, "-n25", "HEAD" }));
+}
+
+TEST(Reflog, TakesAnExplicitRefAndAnUnlimitedCount)
+{
+    auto h = MakeHarness();
+    h.backend->Reflog("root", "refs/stash", 0);
+    EXPECT_EQ(h.fake->ArgsOf(0),
+              (Args{ "-C", "root", "reflog", "show", REFLOG_FMT, "refs/stash" }));
+}
+
+TEST(Reflog, EmptyForARefWithNoReflogOrABadRef)
+{
+    auto h = MakeHarness();
+    // git exits non-zero for a ref that has no reflog; that degrades to an empty list, which is
+    // why no .git filesystem probing is needed to keep it quiet.
+    h.fake->SetResponse("fatal: 'refs/stash' is not a valid ref\n", 128);
+    EXPECT_EQ(h.backend->Reflog("root", "refs/stash", 10), "");
+    EXPECT_EQ(h.backend->Reflog("", "HEAD", 10), "");
+    EXPECT_EQ(h.backend->Reflog("root", "--all", 10), "");
+    EXPECT_EQ(h.fake->CallCount(), 1u);
 }
 
 // ---- Null runner (defensive) -------------------------------------------------------------------
@@ -1321,4 +2098,22 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
     EXPECT_EQ(backend.Pull("root", "origin", "main", {}), "ERR" + US + "git pull failed");
     EXPECT_EQ(backend.Push("root", "origin", "main", false, false, {}),
               "ERR" + US + "git push failed");
+    EXPECT_EQ(backend.Merge("root", "feature", false, false, {}), "ERR" + US + "git merge failed");
+    EXPECT_EQ(backend.Rebase("root", "main", {}), "ERR" + US + "git rebase failed");
+    EXPECT_EQ(backend.CherryPick("root", { "abc" }, false, {}),
+              "ERR" + US + "git cherry-pick failed");
+    EXPECT_EQ(backend.Revert("root", "abc", 0, false, {}), "ERR" + US + "git revert failed");
+    EXPECT_EQ(backend.SequencerAction("root", "merge", "abort", {}),
+              "ERR" + US + "git merge --abort failed");
+    EXPECT_EQ(backend.MergeTool("root", "f.txt", "", {}), "ERR" + US + "git mergetool failed");
+    EXPECT_EQ(backend.RepositoryState("root"),
+              "ERR" + US + "The folder is not a Git repository");
+    EXPECT_EQ(backend.StashList("root"), "");
+    EXPECT_EQ(backend.StashSave("root", "wip", false, false), "ERR" + US + "git stash failed");
+    EXPECT_EQ(backend.StashApply("root", ""), "ERR" + US + "git stash apply failed");
+    EXPECT_EQ(backend.StashPop("root", ""), "ERR" + US + "git stash pop failed");
+    EXPECT_EQ(backend.StashDrop("root", ""), "ERR" + US + "git stash drop failed");
+    EXPECT_EQ(backend.Blame("root", "HEAD", "a", false, ""), "ERR" + US + "git blame failed");
+    EXPECT_EQ(backend.SearchLog("root", "message", "x", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(backend.Reflog("root", "HEAD", 10), "");
 }

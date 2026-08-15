@@ -8,6 +8,10 @@
 
 #include "GitBackend.h"
 
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -18,6 +22,29 @@ namespace ms
         // Field separator inside a record is 0x1F; records are separated by 0x1E (emitted directly
         // by git's --pretty=format below). These bytes never occur in normal commit text.
         constexpr char US = '\x1f';
+
+        // The 12-field commit record: full %H, short %h, parents %P, author name/email/ISO date,
+        // committer name/email/ISO date, ref decorations %D (description badges), subject %s,
+        // body %b. Records end with RS.
+        //
+        // SHARED by Log and SearchLog on purpose: C# parses these positionally with a field-count
+        // floor, so if the two ever drifted, search results would silently mis-map into columns.
+        constexpr const char* kLogFormat =
+            "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%s%x1f%b%x1e";
+
+        // order: 0 = date, 1 = topo, 2 = reverse-date, 3 = author-date. `reverse` receives whether
+        // --reverse must be appended (mode 2 is date order, walked backwards).
+        const char* LogOrderFlag(int order, bool& reverse)
+        {
+            reverse = false;
+            switch (order)
+            {
+            case 1: return "--topo-order";
+            case 2: reverse = true; return "--date-order"; // "Reverse Date Order"
+            case 3: return "--author-date-order";
+            default: return "--date-order";
+            }
+        }
 
         void TrimTrailingNewlines(std::string& s)
         {
@@ -114,27 +141,15 @@ namespace ms
         if (root.empty())
             return std::string();
 
-        const char* orderFlag = "--date-order";
         bool reverse = false;
-        switch (order)
-        {
-        case 1: orderFlag = "--topo-order"; break;
-        case 2: orderFlag = "--date-order"; reverse = true; break; // "Reverse Date Order"
-        case 3: orderFlag = "--author-date-order"; break;
-        default: orderFlag = "--date-order"; break;
-        }
-
-        // full %H, short %h, parents %P, author name/email/ISO date, committer name/email/ISO date,
-        // ref decorations %D (for description badges), subject %s, body %b. Records end with RS.
-        const std::string fmt =
-            "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%s%x1f%b%x1e";
+        const char* orderFlag = LogOrderFlag(order, reverse);
 
         std::vector<std::string> args = { "log", "--all", "--parents", orderFlag };
         if (reverse)
             args.push_back("--reverse");
         if (maxCount > 0)
             args.push_back("-n" + std::to_string(maxCount));
-        args.push_back(fmt);
+        args.push_back(kLogFormat);
 
         int code;
         return RunGitC(root, args, code);
@@ -677,5 +692,645 @@ namespace ms
         args.push_back(remote);
         args.push_back(branch);
         return RunNetworkCommand(root, std::move(args), progress, "git push failed");
+    }
+
+    // ---- Merge / rebase / cherry-pick / revert (Phase 7) ---------------------------------------
+
+    namespace
+    {
+        // Every command in this section can decide it needs an editor: merge writes a merge
+        // message, `rebase --continue` and `cherry-pick --continue` re-open the commit message,
+        // and `rebase` may reach for the sequence editor. A GUI process has nowhere to put one, so
+        // a child that launches it never returns and the progress dialog hangs with no output.
+        // Pointing all three at `true` makes git accept the message it already has.
+        // (`--no-edit` is passed as well wherever the flag exists — this is the belt to that's
+        // braces, and the only cover for the --continue commands, which have no such flag.)
+        std::vector<std::pair<std::string, std::string>> NonInteractiveEnv()
+        {
+            return {
+                { "GIT_EDITOR", "true" },
+                { "GIT_SEQUENCE_EDITOR", "true" },
+                { "GIT_TERMINAL_PROMPT", "0" },
+            };
+        }
+
+        // std::filesystem::path built from a plain std::string reads it in the OS's narrow
+        // encoding (the ANSI code page on Windows). git hands us UTF-8, so a repository under a
+        // non-ASCII path would silently look empty. The u8string overload pins the encoding.
+        std::filesystem::path FsPath(const std::string& utf8)
+        {
+            return std::filesystem::path(
+                std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
+        }
+
+        bool PathExists(const std::filesystem::path& p)
+        {
+            std::error_code ec;
+            return std::filesystem::exists(p, ec) && !ec;
+        }
+
+        bool DirExists(const std::filesystem::path& p)
+        {
+            std::error_code ec;
+            return std::filesystem::is_directory(p, ec) && !ec;
+        }
+
+        // Contents of a small git control file (HEAD-name, msgnum, ...), trimmed; empty when the
+        // file is absent or unreadable. These are always tiny and always ASCII/UTF-8.
+        std::string ReadControlFile(const std::filesystem::path& p)
+        {
+            std::ifstream in(p, std::ios::binary);
+            if (!in)
+                return std::string();
+            std::ostringstream buffer;
+            buffer << in.rdbuf();
+            std::string text = buffer.str();
+            TrimTrailingNewlines(text);
+            return text;
+        }
+
+        int ReadControlInt(const std::filesystem::path& p)
+        {
+            std::string text = ReadControlFile(p);
+            if (text.empty())
+                return 0;
+            try { return std::stoi(text); }
+            catch (...) { return 0; }
+        }
+
+        std::string ShortSha(const std::string& sha)
+        {
+            // *_HEAD holds one full sha per line (an octopus merge writes several); the banner
+            // wants something short, so take the first and abbreviate it the way git does.
+            std::string first = sha.substr(0, sha.find('\n'));
+            TrimTrailingNewlines(first);
+            return first.size() > 7 ? first.substr(0, 7) : first;
+        }
+
+        // MERGE_MSG as a commit message: git's own comment lines ("# Conflicts:", "#\tfile") are
+        // instructions to the editor, not message text. `commit --cleanup=strip` would drop them
+        // anyway — dropping them here is what keeps them out of the editor the user actually sees.
+        std::string StripCommentLines(const std::string& text)
+        {
+            std::string result;
+            std::size_t start = 0;
+            while (start <= text.size())
+            {
+                std::size_t end = text.find('\n', start);
+                if (end == std::string::npos)
+                    end = text.size();
+                std::string line = text.substr(start, end - start);
+                if (line.empty() || line[0] != '#')
+                {
+                    result += line;
+                    result += '\n';
+                }
+                start = end + 1;
+            }
+            TrimTrailingNewlines(result);
+            return result;
+        }
+
+        bool Contains(const std::vector<std::string>& haystack, const std::string& needle)
+        {
+            return std::find(haystack.begin(), haystack.end(), needle) != haystack.end();
+        }
+
+        // A merge-tool name reaches git as `--tool=<name>`; git looks it up in its own table and in
+        // mergetool.<name>.cmd. Anything outside this character set is a typo, not a tool, and
+        // saying so beats git's rather opaque "Unknown merge tool" for a stray quote.
+        bool IsPlainToolName(const std::string& s)
+        {
+            for (char c : s)
+            {
+                bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                          || c == '.' || c == '_' || c == '-' || c == '+';
+                if (!ok)
+                    return false;
+            }
+            return !s.empty();
+        }
+    }
+
+    std::string GitBackend::RunSequencerCommand(const std::string& root,
+                                                std::vector<std::string> args,
+                                                const ProgressSink& progress,
+                                                const char* fallback) const
+    {
+        RunOptions options;
+        options.onOutput = progress;
+        options.env = NonInteractiveEnv();
+        int code;
+        std::string out = RunGitC(root, std::move(args), std::move(options), code);
+        return OkOrErr(std::move(out), code, fallback);
+    }
+
+    std::string GitBackend::Merge(const std::string& root, const std::string& refName,
+                                  bool noFastForward, bool noCommit,
+                                  const ProgressSink& progress) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(refName))
+            return Err("No branch or commit was provided");
+
+        // `--` before the ref (as TortoiseGit does) so a branch whose name also matches a path can
+        // never be read as a pathspec. Never --squash: that would drop the second parent and quietly
+        // turn a merge into a plain commit, which is not what "merge" was asked for.
+        std::vector<std::string> args = { "merge", "--no-edit" };
+        if (noFastForward)
+            args.push_back("--no-ff");
+        if (noCommit)
+            args.push_back("--no-commit");
+        args.push_back("--");
+        args.push_back(refName);
+        return RunSequencerCommand(root, std::move(args), progress, "git merge failed");
+    }
+
+    std::string GitBackend::Rebase(const std::string& root, const std::string& upstream,
+                                   const ProgressSink& progress) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(upstream))
+            return Err("No upstream branch was provided");
+        // Non-interactive only: no -i (there is no todo-list editor here), no --autosquash, and no
+        // --autostash — a rebase that silently stashes and re-applies the working tree is exactly
+        // the kind of hidden step this app does not take on the user's behalf. git rebase takes no
+        // `--` separator, so the upstream is passed on its own.
+        return RunSequencerCommand(root, { "rebase", upstream }, progress, "git rebase failed");
+    }
+
+    std::string GitBackend::CherryPick(const std::string& root,
+                                       const std::vector<std::string>& shas, bool noCommit,
+                                       const ProgressSink& progress) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (shas.empty())
+            return Err("No commits were provided");
+
+        // One command for the whole set: git applies them left to right and stops at the first
+        // conflict with the rest still queued in .git/sequencer, which is what makes
+        // continue/skip/abort work across a multi-commit pick. The caller passes them oldest-first.
+        std::vector<std::string> args = { "cherry-pick", "--no-edit" };
+        if (noCommit)
+            args.push_back("-n");
+        args.insert(args.end(), shas.begin(), shas.end());
+        return RunSequencerCommand(root, std::move(args), progress, "git cherry-pick failed");
+    }
+
+    std::string GitBackend::Revert(const std::string& root, const std::string& sha, int mainline,
+                                   bool noCommit, const ProgressSink& progress) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(sha))
+            return Err("No commit was provided");
+
+        std::vector<std::string> args = { "revert", "--no-edit" };
+        if (mainline > 0)
+        {
+            // Only for a merge commit, and then it is mandatory: git cannot know which side of the
+            // merge "undoing it" should keep. Passing -m for an ordinary commit is an error, so a
+            // mainline of 0 means "leave it out".
+            args.push_back("-m");
+            args.push_back(std::to_string(mainline));
+        }
+        if (noCommit)
+            args.push_back("-n");
+        args.push_back(sha);
+        return RunSequencerCommand(root, std::move(args), progress, "git revert failed");
+    }
+
+    std::string GitBackend::SequencerAction(const std::string& root, const std::string& operation,
+                                            const std::string& action,
+                                            const ProgressSink& progress) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+
+        // Allowlists, not pass-through: these two strings become the git subcommand and its flag,
+        // and the set of legal pairs is small, fixed, and not the same for every operation —
+        // `git merge --skip` does not exist.
+        const std::vector<std::string> mergeActions = { "continue", "abort" };
+        const std::vector<std::string> sequencerActions = { "continue", "abort", "skip" };
+
+        const std::vector<std::string>* allowed = nullptr;
+        if (operation == "merge")
+            allowed = &mergeActions;
+        else if (operation == "rebase" || operation == "cherry-pick" || operation == "revert")
+            allowed = &sequencerActions;
+
+        if (allowed == nullptr)
+            return Err("Unknown operation: " + operation);
+        if (!Contains(*allowed, action))
+        {
+            // Quote the action rather than splicing it behind "--": a rejected value is arbitrary
+            // text, and gluing dashes onto it produces nonsense like "no ----exec=…".
+            return Err("\"" + action + "\" is not a valid action for git " + operation);
+        }
+
+        const std::string fallback = "git " + operation + " --" + action + " failed";
+        return RunSequencerCommand(root, { operation, "--" + action }, progress, fallback.c_str());
+    }
+
+    std::string GitBackend::MergeTool(const std::string& root, const std::string& path,
+                                      const std::string& tool, const ProgressSink& progress) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(path))
+            return Err("No file was provided");
+        if (!tool.empty() && !IsPlainToolName(tool))
+            return Err("\"" + tool + "\" is not a merge tool name. Use a name git knows "
+                       "(git mergetool --tool-help lists them).");
+
+        // --no-prompt: git otherwise asks "Hit return to start merge resolution tool" on a terminal
+        // that does not exist here. Git does the rest — extracting the BASE/LOCAL/REMOTE
+        // temporaries, launching the tool, and `git add`-ing the file when the tool exits cleanly.
+        // An empty tool name leaves the choice to the user's own merge.tool configuration.
+        std::vector<std::string> args = { "mergetool", "--no-prompt" };
+        if (!tool.empty())
+            args.push_back("--tool=" + tool);
+        args.push_back("--");
+        args.push_back(path);
+        return RunSequencerCommand(root, std::move(args), progress, "git mergetool failed");
+    }
+
+    std::string GitBackend::RepositoryState(const std::string& root) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+
+        // ONE spawn, then read the directory. The alternative — `rev-parse --verify` per candidate
+        // ref — is five spawns on every refresh (~42 ms each, measured), and it still cannot answer
+        // the rebase question: a rebase in progress is a DIRECTORY, not a ref, and no git command
+        // reports it in a machine-readable, locale-independent form. TortoiseGit checks the same
+        // paths. --absolute-git-dir (not "<root>/.git") is what makes this correct inside a linked
+        // worktree, where these files live under .git/worktrees/<name>/.
+        int code;
+        std::string gitDirText = RunGitC(root, { "rev-parse", "--absolute-git-dir" }, code);
+        TrimTrailingNewlines(gitDirText);
+        if (code != 0 || gitDirText.empty())
+            return Err("The folder is not a Git repository");
+
+        const std::filesystem::path gitDir = FsPath(gitDirText);
+
+        std::string state = "none";
+        std::string detail;
+        int step = 0;
+        int total = 0;
+
+        const std::filesystem::path rebaseMerge = gitDir / "rebase-merge";
+        const std::filesystem::path rebaseApply = gitDir / "rebase-apply";
+
+        if (DirExists(rebaseMerge) || DirExists(rebaseApply))
+        {
+            state = "rebasing";
+            // The merge backend (git's default since 2.26) writes rebase-merge/*; the apply backend
+            // (`--apply`, or an `am`-based rebase) writes rebase-apply/* with different file names.
+            if (DirExists(rebaseMerge))
+            {
+                detail = ReadControlFile(rebaseMerge / "head-name");
+                step = ReadControlInt(rebaseMerge / "msgnum");
+                total = ReadControlInt(rebaseMerge / "end");
+            }
+            else
+            {
+                detail = ReadControlFile(rebaseApply / "head-name");
+                step = ReadControlInt(rebaseApply / "next");
+                total = ReadControlInt(rebaseApply / "last");
+            }
+            const std::string heads = "refs/heads/";
+            if (detail.rfind(heads, 0) == 0)
+                detail = detail.substr(heads.size());
+        }
+        else if (PathExists(gitDir / "CHERRY_PICK_HEAD"))
+        {
+            state = "cherry-picking";
+            detail = ShortSha(ReadControlFile(gitDir / "CHERRY_PICK_HEAD"));
+        }
+        else if (PathExists(gitDir / "REVERT_HEAD"))
+        {
+            state = "reverting";
+            detail = ShortSha(ReadControlFile(gitDir / "REVERT_HEAD"));
+        }
+        else if (PathExists(gitDir / "MERGE_HEAD"))
+        {
+            state = "merging";
+            detail = ShortSha(ReadControlFile(gitDir / "MERGE_HEAD"));
+        }
+
+        // MERGE_MSG is written by merge, cherry-pick and revert alike, and is what the commit
+        // editor should open with. It survives after the conflict is resolved, which is the point:
+        // the message must still be there when the user finally commits.
+        std::string message = state == "none"
+            ? std::string()
+            : StripCommentLines(ReadControlFile(gitDir / "MERGE_MSG"));
+
+        return std::string("OK") + US + state + US + detail + US + std::to_string(step) + US
+             + std::to_string(total) + US + message;
+    }
+
+    // ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------------
+
+    namespace
+    {
+        // A stash entry is addressed as stash@{N} — a reflog selector, not a ref name. Accepting
+        // only that exact shape (or empty, meaning "the most recent") keeps anything the user or a
+        // stale UI row could carry from reaching git's argv as a revision expression.
+        bool IsStashRef(const std::string& s)
+        {
+            if (s.empty())
+                return true; // empty = stash@{0}, git's own default
+            const std::string prefix = "stash@{";
+            if (s.size() < prefix.size() + 2 || s.compare(0, prefix.size(), prefix) != 0)
+                return false;
+            if (s.back() != '}')
+                return false;
+            std::size_t digits = s.size() - prefix.size() - 1;
+            if (digits == 0)
+                return false;
+            for (std::size_t i = prefix.size(); i < s.size() - 1; ++i)
+            {
+                if (s[i] < '0' || s[i] > '9')
+                    return false;
+            }
+            return true;
+        }
+
+        // A leading '-' would be read as an option rather than a revision/path. git's
+        // --end-of-options needs 2.24, so refuse instead of relying on it.
+        bool LooksLikeOption(const std::string& s)
+        {
+            return !s.empty() && s[0] == '-';
+        }
+
+        // Blame content lines are raw file bytes. A NUL would truncate the whole payload at the
+        // managed marshaller, so a binary file has to be refused rather than silently half-shown.
+        bool ContainsNul(const std::string& s)
+        {
+            return s.find('\0') != std::string::npos;
+        }
+
+    }
+
+    std::string GitBackend::StashList(const std::string& root) const
+    {
+        if (root.empty())
+            return std::string();
+        // `git stash list` is a reflog walk over refs/stash, so it is log-family: %x1f escapes
+        // apply (NOT for-each-ref's %1f). %gd is the selector ("stash@{0}"), %gs the reflog
+        // subject, which is exactly the stash message git composed or the user supplied.
+        // An empty stash prints nothing and exits 0 — naturally an empty list.
+        int code;
+        std::string out = RunGitC(root,
+            { "stash", "list", "--format=%gd%x1f%H%x1f%h%x1f%gs%x1f%aI%x1f%an%x1e" },
+            code);
+        // Checked explicitly: git writes its diagnostics to the same merged stream as its records,
+        // so without this a failure would be handed to the record parser as if it were data.
+        return code == 0 ? out : std::string();
+    }
+
+    std::string GitBackend::StashSave(const std::string& root, const std::string& message,
+                                      bool includeUntracked, bool keepIndex) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+
+        // The stash's own commit, or empty when refs/stash does not exist yet. Comparing it before
+        // and after is how "stashed nothing" is told from "stashed something": `git stash push`
+        // exits 0 either way, and matching its "No local changes to save" text would break under
+        // any non-English locale.
+        auto stashTip = [this, &root]()
+        {
+            int code;
+            std::string sha = RunGitC(root, { "rev-parse", "--verify", "--quiet", "refs/stash" }, code);
+            TrimTrailingNewlines(sha);
+            return code == 0 ? sha : std::string();
+        };
+
+        const std::string before = stashTip();
+
+        std::vector<std::string> args = { "stash", "push" };
+        if (includeUntracked)
+            args.push_back("--include-untracked");
+        if (keepIndex)
+            args.push_back("--keep-index");
+        if (!IsBlank(message))
+        {
+            args.push_back("-m");
+            args.push_back(message);
+        }
+
+        int code;
+        std::string out = RunGitC(root, args, code);
+        if (code != 0)
+            return OkOrErr(std::move(out), code, "git stash failed");
+
+        // Exit 0 with an unchanged refs/stash means git had nothing to stash. Reporting that is
+        // the difference between "your work is parked" and "your work is still sitting here".
+        if (stashTip() == before)
+            return Err("There were no local changes to save.");
+        return "OK";
+    }
+
+    std::string GitBackend::StashApply(const std::string& root, const std::string& ref) const
+    {
+        return RunStashCommand(root, "apply", ref, "git stash apply failed");
+    }
+
+    std::string GitBackend::StashPop(const std::string& root, const std::string& ref) const
+    {
+        return RunStashCommand(root, "pop", ref, "git stash pop failed");
+    }
+
+    std::string GitBackend::StashDrop(const std::string& root, const std::string& ref) const
+    {
+        return RunStashCommand(root, "drop", ref, "git stash drop failed");
+    }
+
+    std::string GitBackend::RunStashCommand(const std::string& root, const char* action,
+                                            const std::string& ref, const char* fallback) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (!IsStashRef(ref))
+            return Err("Not a stash entry: " + ref);
+
+        std::vector<std::string> args = { "stash", action };
+        if (!ref.empty())
+            args.push_back(ref);
+        int code;
+        std::string out = RunGitC(root, args, code);
+        // A conflicting apply/pop exits non-zero with the markers already written; that reaches the
+        // caller as ERR carrying git's own text, which the host turns into a conflict hint.
+        return OkOrErr(std::move(out), code, fallback);
+    }
+
+    std::string GitBackend::Blame(const std::string& root, const std::string& rev,
+                                  const std::string& path, bool ignoreWhitespace,
+                                  const std::string& detectMoves) const
+    {
+        if (root.empty())
+            return Err("No repository root was provided");
+        if (IsBlank(path))
+            return Err("No file was provided");
+        if (LooksLikeOption(path) || LooksLikeOption(rev))
+            return Err("Invalid revision or path");
+
+        // Named modes rather than an int ladder, for the reason MsGitSequencerAction spells out.
+        // The flags mirror TortoiseGit's detect-moved-or-copied setting.
+        std::vector<std::string> moveFlags;
+        if (detectMoves.empty() || detectMoves == "none")
+            ; // no flags
+        else if (detectMoves == "file")
+            moveFlags = { "-M" };                 // moved within the same file
+        else if (detectMoves == "commit")
+            moveFlags = { "-C" };                 // copied from files modified in the same commit
+        else if (detectMoves == "any")
+            moveFlags = { "-C", "-C" };           // ...and from any file in the commit that created it
+        else
+            return Err("Unknown move detection mode: " + detectMoves);
+
+        // --porcelain, not --line-porcelain: the latter repeats every header on every line, which
+        // is many times the output for the same information. The per-commit header dedup it implies
+        // is unpacked by the host's parser.
+        std::vector<std::string> args = { "-c", "core.quotePath=false", "blame", "--porcelain" };
+        if (ignoreWhitespace)
+            args.push_back("-w");
+        args.insert(args.end(), moveFlags.begin(), moveFlags.end());
+        args.push_back(rev.empty() ? "HEAD" : rev);
+        args.push_back("--");
+        args.push_back(path);
+
+        int code;
+        std::string out = RunGitC(root, args, code);
+        if (code != 0)
+        {
+            TrimTrailingNewlines(out);
+            return Err(out.empty() ? std::string("git blame failed") : std::move(out));
+        }
+        if (ContainsNul(out))
+            return Err("This file is binary; blame is not available.");
+
+        // OK/ERR-framed even though this is a read: "path not in that revision" is a routine,
+        // actionable failure and the message is worth keeping. The host splits on the FIRST US
+        // only, so 0x1F bytes inside file content stay intact.
+        return std::string("OK") + US + out;
+    }
+
+    std::string GitBackend::SearchLog(const std::string& root, const std::string& mode,
+                                      const std::string& query, const std::string& pathFilter,
+                                      int order, int maxCount, bool matchCase, bool useRegex,
+                                      bool allBranches) const
+    {
+        if (root.empty())
+            return std::string();
+
+        const std::vector<std::string> modes = { "message", "author", "content", "path", "hash" };
+        if (!Contains(modes, mode))
+            return std::string();
+
+        const bool hasQuery = !IsBlank(query);
+        const bool hasPath = !IsBlank(pathFilter);
+        // Nothing to search for: an unfiltered `git log` here would look like a successful search
+        // that happened to match everything.
+        if (!hasQuery && !hasPath)
+            return std::string();
+
+        // A hash is resolved, not matched: verify it names a commit first so a typo comes back as
+        // an empty result rather than git's "unknown revision" text rendered as a commit list.
+        if (mode == "hash")
+        {
+            if (!hasQuery || LooksLikeOption(query))
+                return std::string();
+            int probeCode;
+            std::string sha = RunGitC(root,
+                { "rev-parse", "--verify", "--quiet", query + "^{commit}" }, probeCode);
+            TrimTrailingNewlines(sha);
+            if (probeCode != 0 || sha.empty())
+                return std::string();
+            int code;
+            std::string one = RunGitC(root, { "log", "--parents", "-n1", kLogFormat, sha }, code);
+            return code == 0 ? one : std::string();
+        }
+
+        bool reverse = false;
+        const char* orderFlag = LogOrderFlag(order, reverse);
+
+        std::vector<std::string> args = { "log", "--parents", orderFlag };
+        if (allBranches)
+            args.push_back("--all");
+        if (reverse)
+            args.push_back("--reverse");
+        if (maxCount > 0)
+            args.push_back("-n" + std::to_string(maxCount));
+
+        // ONE predicate per mode. git ANDs --grep with --author rather than ORing them, so a single
+        // box claiming to search "message or author" would quietly return the intersection; making
+        // the field an explicit choice is the only honest way to spend one spawn.
+        if (hasQuery && mode == "message")
+        {
+            if (!useRegex)
+                args.push_back("--fixed-strings");
+            args.push_back("--grep=" + query);
+        }
+        else if (hasQuery && mode == "author")
+        {
+            args.push_back("--author=" + query);
+        }
+        else if (hasQuery && mode == "content")
+        {
+            // -S counts occurrences (did this string appear or disappear); -G matches the diff text
+            // itself, which is what a regex over a change means.
+            args.push_back((useRegex ? "-G" : "-S") + query);
+        }
+        if (!matchCase)
+            args.push_back("--regexp-ignore-case");
+
+        args.push_back(kLogFormat);
+        args.push_back("--");
+        // In "path" mode the query IS the pathspec (SEARCH-002); any mode may additionally be
+        // narrowed by an explicit path filter.
+        if (mode == "path" && hasQuery)
+            args.push_back(query);
+        if (hasPath)
+            args.push_back(pathFilter);
+
+        int code;
+        std::string out = RunGitC(root, args, code);
+        // A rejected pattern (bad regex, unknown pathspec magic) must read as "no results", not as
+        // git's complaint fed to the record parser.
+        return code == 0 ? out : std::string();
+    }
+
+    std::string GitBackend::Reflog(const std::string& root, const std::string& ref,
+                                   int maxCount) const
+    {
+        if (root.empty())
+            return std::string();
+        if (LooksLikeOption(ref))
+            return std::string();
+
+        // %gd selector, %H/%h the commit, %gs the reflog subject ("commit: <subject>",
+        // "pull: Fast-forward"), %aI/%an the commit's author, %s the commit subject — the reflog
+        // subject is often terser than the commit's own.
+        //
+        // A ref with no reflog makes git exit non-zero; the ""-on-error path already degrades to an
+        // empty list, so no filesystem probing is needed to keep that quiet.
+        std::vector<std::string> args = {
+            "reflog", "show", "--format=%gd%x1f%H%x1f%h%x1f%gs%x1f%aI%x1f%an%x1f%s%x1e"
+        };
+        if (maxCount > 0)
+            args.push_back("-n" + std::to_string(maxCount));
+        args.push_back(ref.empty() ? "HEAD" : ref);
+
+        int code;
+        std::string out = RunGitC(root, args, code);
+        // Checked, not assumed: "not a valid ref" is the ORDINARY answer for refs/stash in a repo
+        // that has never stashed, and it arrives on the same merged stream as the records would.
+        return code == 0 ? out : std::string();
     }
 }

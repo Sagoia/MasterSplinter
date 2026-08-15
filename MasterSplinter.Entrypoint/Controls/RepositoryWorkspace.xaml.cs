@@ -43,15 +43,30 @@ namespace MasterSplinter.Entrypoint.Controls
             // (sidebar "Working Copy" tap, selecting a commit, refresh).
             Vm.PropertyChanged += (_, e) =>
             {
-                if (e.PropertyName == nameof(MainViewModel.IsWorkingCopyMode))
+                if (e.PropertyName == nameof(MainViewModel.IsWorkingCopyMode) ||
+                    e.PropertyName == nameof(MainViewModel.IsReflogMode))
+                {
                     SyncModeBar();
+                }
+                // A blame window holds its own GitRepository, so it has to go when the workspace
+                // moves to a different one (or to none) — otherwise it keeps showing a file from a
+                // repository the user has closed.
+                else if (e.PropertyName == nameof(MainViewModel.Repository))
+                {
+                    CloseBlameWindows();
+                }
             };
         }
 
         private void SyncModeBar()
         {
             _syncingModeBar = true;
-            try { ModeBar.SelectedItem = Vm.IsWorkingCopyMode ? ModeFileStatus : ModeLogHistory; }
+            try
+            {
+                ModeBar.SelectedItem = Vm.IsWorkingCopyMode ? ModeFileStatus
+                                     : Vm.IsReflogMode ? ModeReflog
+                                     : ModeLogHistory;
+            }
             finally { _syncingModeBar = false; }
         }
 
@@ -65,12 +80,83 @@ namespace MasterSplinter.Entrypoint.Controls
             else if (sender.SelectedItem == ModeLogHistory)
             {
                 Vm.ExitWorkingCopy();
+                Vm.ExitReflog();
+            }
+            else if (sender.SelectedItem == ModeReflog)
+            {
+                await Vm.EnterReflogAsync();
             }
             else
             {
-                // "Search" is not a view yet — snap the selection back to the current mode.
+                // Search is an action on the current list, not a mode of its own: put the caret in
+                // the box and snap the tab back to whatever is actually showing.
                 SyncModeBar();
+                SearchBox.Focus(FocusState.Programmatic);
+                SearchBox.SelectAll();
             }
+        }
+
+        // ---- Search (Phase 8, SEARCH-001/002) --------------------------------------------------
+
+        private async void SearchBox_KeyDown(object sender, KeyRoutedEventArgs e)
+        {
+            if (e.Key != Windows.System.VirtualKey.Enter)
+                return;
+            e.Handled = true;
+            await Vm.RunSearchAsync();
+        }
+
+        // Button.Flyout has proven unreliable on these styled icon buttons (see the diff-settings
+        // flyout), so it is opened explicitly here too.
+        private void SearchOptions_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is FrameworkElement fe)
+                Microsoft.UI.Xaml.Controls.Primitives.FlyoutBase.ShowAttachedFlyout(fe);
+        }
+
+        private async void RunSearch_Click(object sender, RoutedEventArgs e)
+        {
+            // The flyout hosts this button, so it has to close before the results it produced can
+            // be seen behind it.
+            SearchOptionsFlyout.Hide();
+            await Vm.RunSearchAsync();
+        }
+
+        private async void SearchBanner_Close(InfoBar sender, object args)
+            => await Vm.ClearSearchResultsAsync();
+
+        // ---- Reflog (Phase 8, REFLOG-001) ------------------------------------------------------
+
+        private async void Reflog_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (e.AddedItems.Count > 0 && e.AddedItems[0] is ReflogEntry entry)
+                await Vm.SelectReflogEntryAsync(entry);
+        }
+
+        private static ReflogEntry? ReflogEntryOf(object sender)
+            => (sender as FrameworkElement)?.DataContext as ReflogEntry;
+
+        private async void ReflogCreateBranch_Click(object sender, RoutedEventArgs e)
+        {
+            ReflogEntry? entry = ReflogEntryOf(sender);
+            if (entry == null) return;
+            // The sha, not the selector: HEAD@{5} is relative to the reflog and would drift the
+            // moment anything else moves HEAD.
+            await ShowCreateBranchDialogAsync(entry.Sha, $"commit {entry.ShortSha}");
+        }
+
+        private async void ReflogCheckout_Click(object sender, RoutedEventArgs e)
+        {
+            ReflogEntry? entry = ReflogEntryOf(sender);
+            if (entry == null) return;
+            await CheckoutCommitWithConfirmAsync(entry.Sha, entry.ShortSha, entry.Description);
+        }
+
+        private void ReflogCopyHash_Click(object sender, RoutedEventArgs e)
+        {
+            ReflogEntry? entry = ReflogEntryOf(sender);
+            if (entry != null)
+                CopyToClipboard(entry.Sha);
         }
 
         private async void Refresh_Click(object sender, RoutedEventArgs e) => await Vm.RefreshAsync();
@@ -82,10 +168,22 @@ namespace MasterSplinter.Entrypoint.Controls
             await Vm.RefreshAsync(); // no-ops while a load is already running
         }
 
+        // The list is Extended-select so several commits can be cherry-picked in one go (CHERRY-002).
+        // The detail pane follows the LAST row added to the selection, which is the one the user
+        // just clicked — taking AddedItems[0] would make a shift-select jump to the far end.
         private void Commits_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (e.AddedItems.Count > 0 && e.AddedItems[0] is CommitRow row)
+            if (e.AddedItems.Count > 0 && e.AddedItems[^1] is CommitRow row)
                 Vm.SelectedCommit = row;
+        }
+
+        /// <summary>The commits the user has selected, in list order (top row first).</summary>
+        private List<CommitRow> SelectedCommits()
+        {
+            var rows = CommitsList.SelectedItems.OfType<CommitRow>().ToList();
+            if (rows.Count == 0 && Vm.SelectedCommit != null)
+                rows.Add(Vm.SelectedCommit);
+            return rows;
         }
 
         private void Files_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -198,6 +296,29 @@ namespace MasterSplinter.Entrypoint.Controls
                 DefaultButton = ContentDialogButton.Close,
             };
             await dialog.ShowAsync();
+        }
+
+        /// <summary>
+        /// Yes/no confirmation in the house style: the primary button is the VERB ("Delete",
+        /// "Drop"), and the default button is Close so Enter cancels rather than commits.
+        /// </summary>
+        private async Task<bool> ConfirmAsync(string title, string message, string primaryText)
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = new TextBlock
+                {
+                    Text = message,
+                    TextWrapping = TextWrapping.Wrap,
+                    MaxWidth = 400,
+                },
+                PrimaryButtonText = primaryText,
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
         }
 
         // ---- Home screen (CORE-002) -----------------------------------------------------------
@@ -325,15 +446,24 @@ namespace MasterSplinter.Entrypoint.Controls
                 || target.DataContext is not ChangedFile file)
                 return;
 
+            // A conflicted row is a different kind of thing: it cannot be staged as-is or discarded
+            // in any meaningful sense, and the only useful verbs are "resolve it" and "I have".
+            bool conflicted = file.Area == WorkTreeArea.Conflicted;
+
             foreach (var item in menu.Items)
             {
                 if (item is not MenuFlyoutItem mi || mi.Tag is not string tag)
                     continue;
                 bool visible = tag switch
                 {
-                    "stage" => file.Area != WorkTreeArea.Staged,
-                    "unstage" => file.Area == WorkTreeArea.Staged,
-                    "discard" => file.Area != WorkTreeArea.Staged,
+                    "resolve" => conflicted,
+                    "markresolved" => conflicted,
+                    "stage" => !conflicted && file.Area != WorkTreeArea.Staged,
+                    "unstage" => !conflicted && file.Area == WorkTreeArea.Staged,
+                    "discard" => !conflicted && file.Area != WorkTreeArea.Staged,
+                    // BLAME-001: an untracked file has no history to attribute, and a conflicted
+                    // one blames the pre-merge state, which is never what the user is asking about.
+                    "blame" => !conflicted && file.Area != WorkTreeArea.Untracked,
                     _ => true,
                 };
                 mi.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
@@ -478,6 +608,7 @@ namespace MasterSplinter.Entrypoint.Controls
             bool isTag = item.Kind == SidebarKind.Tag;
             bool isRef = isBranch || isRemote || isTag;
             bool isRemoteNode = item.Kind == SidebarKind.Remote; // the "origin" parent, not a branch
+            bool isStash = item.Kind == SidebarKind.Stash;
 
             foreach (var entry in menu.Items)
             {
@@ -489,9 +620,18 @@ namespace MasterSplinter.Entrypoint.Controls
                     "checkoutlocal" => isRemote,
                     "newfrom" => isRef,
                     "rename" => isBranch,
-                    "sep" => isRef,
+                    // Phase 7: merging or rebasing onto the branch you are already on is a no-op,
+                    // and a tag is not something you rebase onto in this UI.
+                    "merge" => (isBranch || isRemote) && !item.IsCurrent,
+                    "rebase" => (isBranch || isRemote) && !item.IsCurrent,
+                    "sepmerge" => (isBranch || isRemote) && !item.IsCurrent,
+                    "sep" => isRef || isStash,
                     "deletebranch" => isBranch && !item.IsCurrent,
                     "deletetag" => isTag,
+                    // Phase 8 (STASH-002/003/004).
+                    "stashapply" => isStash,
+                    "stashpop" => isStash,
+                    "stashdrop" => isStash,
                     "editremote" => isRemoteNode, // REMOTE-008
                     "copyname" => isRef,
                     _ => true,
@@ -603,23 +743,24 @@ namespace MasterSplinter.Entrypoint.Controls
         {
             if (sender is not FrameworkElement fe || fe.DataContext is not CommitRow c)
                 return;
+            await CheckoutCommitWithConfirmAsync(c.FullHash, c.Hash);
+        }
 
-            var dialog = new ContentDialog
+        /// <summary>BR-003 (detached). Shared with the reflog, where checking out an unreachable
+        /// commit is the whole point — the detached-HEAD warning matters more there, not less.</summary>
+        private async Task CheckoutCommitWithConfirmAsync(string fullHash, string shortHash,
+                                                          string? description = null)
+        {
+            string what = string.IsNullOrWhiteSpace(description)
+                ? shortHash
+                : $"{shortHash} ({description})";
+            if (await ConfirmAsync("Check out commit",
+                    $"Checking out {what} leaves HEAD detached — new commits will not belong to "
+                    + "any branch. Create a branch first if you plan to commit.",
+                    "Check Out"))
             {
-                XamlRoot = XamlRoot,
-                Title = "Check out commit",
-                Content = new TextBlock
-                {
-                    Text = $"Checking out {c.Hash} leaves HEAD detached — new commits will not "
-                         + "belong to any branch. Create a branch first if you plan to commit.",
-                    TextWrapping = TextWrapping.Wrap,
-                },
-                PrimaryButtonText = "Check Out",
-                CloseButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Close,
-            };
-            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
-                await Vm.CheckoutCommitAsync(c.FullHash);
+                await Vm.CheckoutCommitAsync(fullHash);
+            }
         }
 
         // ---- The dialogs ----------------------------------------------------------------------
@@ -882,7 +1023,7 @@ namespace MasterSplinter.Entrypoint.Controls
             bool prune = pruneBox.IsChecked == true;
             bool tags = tagsBox.IsChecked == true;
 
-            await RemoteProgressDialog.RunAsync(
+            await GitProgressDialog.RunAsync(
                 XamlRoot, "Fetch",
                 "git fetch --progress " + (all ? "--all" : remote)
                     + (prune ? " --prune" : "") + (tags ? " --tags" : ""),
@@ -931,7 +1072,7 @@ namespace MasterSplinter.Entrypoint.Controls
                     return;
             }
 
-            await RemoteProgressDialog.RunAsync(
+            await GitProgressDialog.RunAsync(
                 XamlRoot, "Pull",
                 $"git pull --ff-only --progress {Vm.UpstreamRemote} {Vm.UpstreamBranch}".TrimEnd(),
                 (progress, token) => Vm.PullAsync(progress, token));
@@ -941,7 +1082,8 @@ namespace MasterSplinter.Entrypoint.Controls
         /// for: tracked edits get committed or stashed, untracked files get moved out of the way.
         /// Saying "uncommitted changes" for an untracked file sends the user looking for something
         /// to commit that does not exist.</summary>
-        private static string DirtyTreeWarning(int tracked, int untracked, string branch)
+        private static string DirtyTreeWarning(int tracked, int untracked, string branch,
+                                               string verb = "fast-forward")
         {
             string what = (tracked, untracked) switch
             {
@@ -952,9 +1094,9 @@ namespace MasterSplinter.Entrypoint.Controls
             };
 
             string risk = tracked > 0
-                ? $"Git will refuse to fast-forward {branch} if the incoming commits change the "
+                ? $"Git will refuse to {verb} {branch} if the incoming commits change the "
                   + "same files"
-                : $"Git will refuse to fast-forward {branch} if the incoming commits add a file "
+                : $"Git will refuse to {verb} {branch} if the incoming commits add a file "
                   + "where one of yours already sits";
             if (tracked > 0 && untracked > 0)
                 risk += ", or add a file where one of your untracked files already sits";
@@ -1038,7 +1180,7 @@ namespace MasterSplinter.Entrypoint.Controls
             bool setUpstream = upstreamBox.IsChecked == true;
             bool pushTags = tagsBox.IsChecked == true;
 
-            await RemoteProgressDialog.RunAsync(
+            await GitProgressDialog.RunAsync(
                 XamlRoot, publishing ? "Publish branch" : "Push",
                 "git push --progress" + (setUpstream ? " --set-upstream" : "")
                     + (pushTags ? " --tags" : "") + $" {remote} {branch}",
@@ -1257,6 +1399,752 @@ namespace MasterSplinter.Entrypoint.Controls
                 return;
             }
             await ShowEditRemoteUrlDialogAsync(match);
+        }
+
+        // ---- Merge / rebase / cherry-pick / revert (Phase 7) -----------------------------------
+
+        /// <summary>Entry points. Everything here funnels into <see cref="GitProgressDialog"/>, so
+        /// a conflict leaves git's own CONFLICT text on screen rather than a bare error bar.</summary>
+        private async void MergeToolbar_Click(object sender, RoutedEventArgs e)
+            => await ShowMergeDialogAsync("");
+
+        private async void SidebarMerge_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item != null)
+                await ShowMergeDialogAsync(item.ShortName);
+        }
+
+        private async void SidebarRebase_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item != null)
+                await ShowRebaseDialogAsync(item.ShortName);
+        }
+
+        /// <summary>Rewrites the cherry-pick item to say how many commits it would apply, so a
+        /// multi-row selection is obvious before the dialog opens. The item is found by tag rather
+        /// than by name: it lives inside a DataTemplate, so x:Name is scoped to the template and
+        /// invisible here.</summary>
+        private void CommitMenu_Opening(object sender, object e)
+        {
+            if (sender is not MenuFlyout menu)
+                return;
+            int count = SelectedCommits().Count;
+            foreach (var entry in menu.Items)
+            {
+                if (entry is MenuFlyoutItem mi && (mi.Tag as string) == "cherrypick")
+                {
+                    mi.Text = count > 1 ? $"Cherry-pick {count} Commits…" : "Cherry-pick Commit…";
+                    return;
+                }
+            }
+        }
+
+        /// <summary>MERGE-001. <paramref name="preferred"/> preselects the invoking branch.</summary>
+        public async Task ShowMergeDialogAsync(string preferred)
+        {
+            if (!await RequireIdleRepositoryAsync("Merge"))
+                return;
+            if (Vm.CurrentBranchName.Length == 0)
+            {
+                await ShowMessageAsync("Merge", "Check out a branch first — a detached HEAD has "
+                                              + "nothing to merge into.");
+                return;
+            }
+
+            // Everything except the current branch: merging a branch into itself does nothing.
+            var options = Vm.CompareRefNames
+                .Where(n => n != "HEAD" && n != Vm.CurrentBranchName)
+                .ToList();
+            if (options.Count == 0)
+            {
+                await ShowMessageAsync("Merge", "There is no other branch or tag to merge in.");
+                return;
+            }
+
+            int preselected = Math.Max(0, options.IndexOf(preferred));
+            var sourceBox = new ComboBox
+            {
+                Header = $"Merge into {Vm.CurrentBranchName}",
+                ItemsSource = options,
+                SelectedIndex = preselected,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            var noFfBox = new CheckBox
+            {
+                Content = "Always create a merge commit (--no-ff)",
+                IsChecked = false,
+            };
+            var noCommitBox = new CheckBox
+            {
+                Content = "Do not commit automatically (--no-commit)",
+                IsChecked = false,
+            };
+
+            var panel = new StackPanel { Spacing = 12, MinWidth = 380 };
+            panel.Children.Add(sourceBox);
+            panel.Children.Add(noFfBox);
+            panel.Children.Add(noCommitBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Merge",
+                Content = panel,
+                PrimaryButtonText = "Merge",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            string source = sourceBox.SelectedItem as string ?? "";
+            if (source.Length == 0)
+                return;
+            bool noFf = noFfBox.IsChecked == true;
+            bool noCommit = noCommitBox.IsChecked == true;
+
+            // Same wording as the pull path: a dirty tree is where a merge goes wrong, and the two
+            // halves of "dirty" need different advice.
+            if (!await ConfirmDirtyTreeAsync("Merge", "merge into"))
+                return;
+
+            await GitProgressDialog.RunAsync(
+                XamlRoot, "Merge",
+                "git merge --no-edit" + (noFf ? " --no-ff" : "") + (noCommit ? " --no-commit" : "")
+                    + $" -- {source}",
+                (progress, token) => Vm.MergeAsync(source, noFf, noCommit, progress, token));
+        }
+
+        /// <summary>REBASE-001 — "warning before operation" is the point of this dialog, not the
+        /// options on it.</summary>
+        public async Task ShowRebaseDialogAsync(string preferred)
+        {
+            if (!await RequireIdleRepositoryAsync("Rebase"))
+                return;
+            string branch = Vm.CurrentBranchName;
+            if (branch.Length == 0)
+            {
+                await ShowMessageAsync("Rebase", "Check out a branch first — a detached HEAD has "
+                                               + "nothing to rebase.");
+                return;
+            }
+
+            var options = Vm.CompareRefNames
+                .Where(n => n != "HEAD" && n != branch)
+                .ToList();
+            if (options.Count == 0)
+            {
+                await ShowMessageAsync("Rebase", "There is no other branch to rebase onto.");
+                return;
+            }
+
+            int preselected = Math.Max(0, options.IndexOf(preferred));
+            var upstreamBox = new ComboBox
+            {
+                Header = $"Rebase {branch} onto",
+                ItemsSource = options,
+                SelectedIndex = preselected,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+            var warning = new TextBlock
+            {
+                Text = $"Rebasing replaces every commit on {branch} that is not already on the "
+                     + "chosen branch with a new commit that has a different SHA. Anyone who has "
+                     + $"already pulled {branch} will be left on the old commits — do not rebase a "
+                     + "branch you have shared.",
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 400,
+            };
+
+            var panel = new StackPanel { Spacing = 12, MinWidth = 400 };
+            panel.Children.Add(upstreamBox);
+            panel.Children.Add(warning);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Rebase",
+                Content = panel,
+                PrimaryButtonText = "Rebase",
+                CloseButtonText = "Cancel",
+                // Close is the default here, unlike merge: this one rewrites history.
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            string upstream = upstreamBox.SelectedItem as string ?? "";
+            if (upstream.Length == 0)
+                return;
+
+            // git refuses a rebase with uncommitted changes outright (no --autostash here by
+            // choice), so saying so first is cheaper than showing the user a failure.
+            var (tracked, _) = await Vm.CountWorkingTreeAsync();
+            if (tracked > 0)
+            {
+                await ShowMessageAsync("Rebase",
+                    $"You have {Count(tracked, "uncommitted change")}. Git will refuse to rebase "
+                    + "with a dirty working tree — commit or stash first.");
+                return;
+            }
+
+            await GitProgressDialog.RunAsync(
+                XamlRoot, "Rebase", $"git rebase {upstream}",
+                (progress, token) => Vm.RebaseAsync(upstream, progress, token));
+        }
+
+        /// <summary>CHERRY-001/002.</summary>
+        private async void CherryPickCommits_Click(object sender, RoutedEventArgs e)
+        {
+            if (!await RequireIdleRepositoryAsync("Cherry-pick"))
+                return;
+
+            List<CommitRow> commits = SelectedCommits();
+            if (commits.Count == 0)
+                return;
+
+            // The order git will apply them in, which is not necessarily the order they appear on
+            // screen — showing it is what makes a multi-commit pick reviewable before it runs.
+            var ordered = Vm.OrderForCherryPick(commits);
+            var list = new StackPanel { Spacing = 2 };
+            foreach (CommitRow c in ordered)
+            {
+                list.Children.Add(new TextBlock
+                {
+                    Text = $"{c.Hash}  {c.Message}",
+                    FontSize = 12,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    MaxWidth = 420,
+                });
+            }
+
+            var intro = new TextBlock
+            {
+                Text = ordered.Count == 1
+                    ? "This commit will be applied on top of the current branch:"
+                    : $"These {ordered.Count} commits will be applied on top of the current branch, "
+                      + "in this order:",
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 420,
+            };
+            var noCommitBox = new CheckBox
+            {
+                Content = "Stage the changes without committing (-n)",
+                IsChecked = false,
+            };
+
+            var panel = new StackPanel { Spacing = 10, MinWidth = 420 };
+            panel.Children.Add(intro);
+            panel.Children.Add(new ScrollViewer { Content = list, MaxHeight = 220 });
+            panel.Children.Add(noCommitBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = ordered.Count == 1 ? "Cherry-pick commit" : $"Cherry-pick {ordered.Count} commits",
+                Content = panel,
+                PrimaryButtonText = "Cherry-pick",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            bool noCommit = noCommitBox.IsChecked == true;
+            await GitProgressDialog.RunAsync(
+                XamlRoot, "Cherry-pick",
+                "git cherry-pick --no-edit" + (noCommit ? " -n" : "")
+                    + " " + string.Join(" ", ordered.Select(c => c.Hash)),
+                (progress, token) => Vm.CherryPickAsync(commits, noCommit, progress, token));
+        }
+
+        /// <summary>REVERT-001 — confirmation required, and for a merge commit git also needs to be
+        /// told which parent to treat as the mainline.</summary>
+        private async void RevertCommit_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not CommitRow commit)
+                return;
+            if (!await RequireIdleRepositoryAsync("Revert"))
+                return;
+
+            bool isMerge = commit.ParentHashes.Length > 1;
+
+            var panel = new StackPanel { Spacing = 12, MinWidth = 400 };
+            panel.Children.Add(new TextBlock
+            {
+                Text = $"Revert {commit.Hash} — “{commit.Message}”?\n\nThis does not remove the "
+                     + "commit: it creates a new commit that undoes its changes, so the history "
+                     + "everyone else has already pulled stays intact.",
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 400,
+            });
+
+            ComboBox? mainlineBox = null;
+            if (isMerge)
+            {
+                // git cannot guess which side of a merge "undoing it" should keep, so -m is
+                // mandatory here; parent 1 is the branch the merge was made ON, which is what
+                // reverting a merge almost always means.
+                var parents = commit.ParentHashes
+                    .Select((p, i) => $"{i + 1}: {(p.Length > 7 ? p[..7] : p)}")
+                    .ToList();
+                mainlineBox = new ComboBox
+                {
+                    Header = "Mainline parent (the side to keep)",
+                    ItemsSource = parents,
+                    SelectedIndex = 0,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                };
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "This is a merge commit. Git needs to know which parent is the mainline "
+                         + "— the history to keep — before it can undo the other side.",
+                    TextWrapping = TextWrapping.Wrap,
+                    Opacity = 0.7,
+                    FontSize = 12,
+                    MaxWidth = 400,
+                });
+                panel.Children.Add(mainlineBox);
+            }
+
+            var noCommitBox = new CheckBox
+            {
+                Content = "Stage the reversal without committing (-n)",
+                IsChecked = false,
+            };
+            panel.Children.Add(noCommitBox);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Revert commit",
+                Content = panel,
+                PrimaryButtonText = "Revert",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            int mainline = isMerge ? (mainlineBox!.SelectedIndex + 1) : 0;
+            bool noCommit = noCommitBox.IsChecked == true;
+
+            await GitProgressDialog.RunAsync(
+                XamlRoot, "Revert",
+                "git revert --no-edit" + (mainline > 0 ? $" -m {mainline}" : "")
+                    + (noCommit ? " -n" : "") + $" {commit.Hash}",
+                (progress, token) => Vm.RevertAsync(commit.FullHash, mainline, noCommit, progress, token));
+        }
+
+        // ---- The state banner's actions (MERGE-002, REBASE-002) --------------------------------
+
+        private async void ResolveConflicts_Click(object sender, RoutedEventArgs e)
+            => await Vm.EnterWorkingCopyAsync();
+
+        private async void ContinueOperation_Click(object sender, RoutedEventArgs e)
+        {
+            string command = Vm.State.GitCommand;
+            if (command.Length == 0)
+                return;
+            if (Vm.HasConflicts)
+            {
+                await ShowMessageAsync("Continue",
+                    $"{Vm.ConflictCount} file{(Vm.ConflictCount == 1 ? " is" : "s are")} still "
+                    + "conflicted. Resolve them and mark them resolved first — git will refuse to "
+                    + "continue while any conflict remains.");
+                return;
+            }
+            await GitProgressDialog.RunAsync(
+                XamlRoot, "Continue", $"git {command} --continue",
+                (progress, token) => Vm.ContinueOperationAsync(progress, token));
+        }
+
+        private async void SkipOperation_Click(object sender, RoutedEventArgs e)
+        {
+            string command = Vm.State.GitCommand;
+            if (command.Length == 0)
+                return;
+
+            var confirm = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Skip this commit",
+                Content = new TextBlock
+                {
+                    Text = "The commit currently being applied will be dropped and the operation "
+                         + "will move on to the next one. Its changes will not appear anywhere.",
+                    TextWrapping = TextWrapping.Wrap,
+                    MaxWidth = 400,
+                },
+                PrimaryButtonText = "Skip",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            await GitProgressDialog.RunAsync(
+                XamlRoot, "Skip", $"git {command} --skip",
+                (progress, token) => Vm.SkipOperationAsync(progress, token));
+        }
+
+        private async void AbortOperation_Click(object sender, RoutedEventArgs e)
+        {
+            string command = Vm.State.GitCommand;
+            if (command.Length == 0)
+                return;
+
+            // MERGE-002: aborting restores the pre-operation state, which also means throwing away
+            // any conflict resolution done so far. Saying so is the whole confirmation.
+            var confirm = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = $"Abort {command}",
+                Content = new TextBlock
+                {
+                    Text = $"Git will put the branch and the working tree back the way they were "
+                         + $"before the {command} started. Any conflicts you have already resolved "
+                         + "will be lost.",
+                    TextWrapping = TextWrapping.Wrap,
+                    MaxWidth = 400,
+                },
+                PrimaryButtonText = "Abort",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            await GitProgressDialog.RunAsync(
+                XamlRoot, "Abort", $"git {command} --abort",
+                (progress, token) => Vm.AbortOperationAsync(progress, token));
+        }
+
+        // ---- Conflict resolution on a working-copy row (MERGE-003/004) -------------------------
+
+        private async void ResolveWithMergeTool_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not ChangedFile file)
+                return;
+
+            string tool = SettingsStore.Load().MergeTool;
+            // The call does not return until the tool's window is closed, so it runs behind the
+            // progress dialog like everything else — Cancel there kills the whole tool process tree.
+            string label = "git mergetool --no-prompt"
+                         + (tool.Length > 0 ? $" --tool={tool}" : "") + $" -- {file.Path}";
+            string? error = await GitProgressDialog.RunAsync(
+                XamlRoot, "Merge tool", label,
+                (progress, token) => Vm.RunMergeToolAsync(file, tool, progress, token));
+
+            if (error != null && tool.Length == 0)
+            {
+                await ShowMessageAsync("Merge tool",
+                    "Git could not start a merge tool. Set one under Tools ▸ Options…, or "
+                    + "configure merge.tool in this repository. Run “git mergetool --tool-help” "
+                    + "to see the names git recognizes.");
+            }
+        }
+
+        private async void MarkResolved_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not ChangedFile file)
+                return;
+
+            // Staging a file with conflict markers still in it is a real and common mistake, and
+            // git will happily commit them. Checking is cheap; the file is already on disk.
+            string? abs = AbsolutePathOf(file);
+            if (abs != null && await HasConflictMarkersAsync(abs))
+            {
+                var warn = new ContentDialog
+                {
+                    XamlRoot = XamlRoot,
+                    Title = "Conflict markers found",
+                    Content = new TextBlock
+                    {
+                        Text = $"{file.Path} still contains conflict markers (<<<<<<<, =======, "
+                             + ">>>>>>>). Marking it resolved now would commit them.",
+                        TextWrapping = TextWrapping.Wrap,
+                        MaxWidth = 400,
+                    },
+                    PrimaryButtonText = "Mark Resolved Anyway",
+                    CloseButtonText = "Cancel",
+                    DefaultButton = ContentDialogButton.Close,
+                };
+                if (await warn.ShowAsync() != ContentDialogResult.Primary)
+                    return;
+            }
+
+            await Vm.MarkResolvedAsync(file);
+        }
+
+        /// <summary>True when the file still holds git's conflict markers. Reads at most the first
+        /// megabyte: a marker further in than that is not a case worth blocking the UI for.</summary>
+        private static async Task<bool> HasConflictMarkersAsync(string absPath)
+        {
+            try
+            {
+                return await Task.Run(() =>
+                {
+                    if (!File.Exists(absPath))
+                        return false;
+                    using var reader = new StreamReader(absPath);
+                    var buffer = new char[1024 * 1024];
+                    int read = reader.Read(buffer, 0, buffer.Length);
+                    string head = new(buffer, 0, read);
+                    return head.Contains("\n<<<<<<< ", StringComparison.Ordinal)
+                        || head.StartsWith("<<<<<<< ", StringComparison.Ordinal);
+                });
+            }
+            catch { return false; } // unreadable/binary: let git be the judge
+        }
+
+        // ---- Shared guards ---------------------------------------------------------------------
+
+        /// <summary>False (after explaining why) when there is no repository, or when one operation
+        /// is already half-finished — git refuses to start a second one, so offering it would only
+        /// produce that refusal.</summary>
+        private async Task<bool> RequireIdleRepositoryAsync(string title)
+        {
+            if (!Vm.HasRepository)
+            {
+                await ShowMessageAsync(title, "Open a repository first.");
+                return false;
+            }
+            if (Vm.HasActiveOperation)
+            {
+                await ShowMessageAsync(title,
+                    $"{Vm.StateTitle}. Finish or abort it first — the banner at the top of the "
+                    + "window has the actions.");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>The pull flow's dirty-tree warning, reused: same risk, same two remedies, with
+        /// the verb swapped so it reads as what is actually about to happen. Returns false when the
+        /// user backs out.</summary>
+        private async Task<bool> ConfirmDirtyTreeAsync(string title, string verb)
+        {
+            var (tracked, untracked) = await Vm.CountWorkingTreeAsync();
+            if (tracked == 0 && untracked == 0)
+                return true;
+
+            var warn = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = new TextBlock
+                {
+                    Text = DirtyTreeWarning(tracked, untracked, Vm.CurrentBranchName, verb),
+                    TextWrapping = TextWrapping.Wrap,
+                    MaxWidth = 400,
+                },
+                PrimaryButtonText = "Continue Anyway",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            return await warn.ShowAsync() == ContentDialogResult.Primary;
+        }
+
+        // ---- Blame (Phase 8, BLAME-001) --------------------------------------------------------
+
+        // Blame windows outlive the click that opened them, so they are tracked: a repository the
+        // main window has closed must not leave a window behind still reading from it.
+        private readonly List<BlameWindow> _blameWindows = new();
+
+        /// <summary>From a commit's file list: blame the file as it was AT that commit.</summary>
+        private void BlameFile_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not ChangedFile file)
+                return;
+            OpenBlameWindow(file.Path, Vm.SelectedCommit?.FullHash ?? "");
+        }
+
+        /// <summary>From the working copy: blame HEAD, which is what the file on disk came from.</summary>
+        private void BlameWorkingFile_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement fe || fe.DataContext is not ChangedFile file)
+                return;
+            OpenBlameWindow(file.Path, "");
+        }
+
+        private void OpenBlameWindow(string path, string rev)
+        {
+            GitRepository? repo = Vm.CurrentRepository;
+            if (repo == null || string.IsNullOrWhiteSpace(path))
+                return;
+
+            var window = new BlameWindow(repo, path, rev, RootLayout.ActualTheme);
+            window.ShowCommitRequested += async (_, sha) => await ShowCommitFromBlameAsync(sha);
+            window.Closed += (_, _) => _blameWindows.Remove(window);
+            _blameWindows.Add(window);
+            window.Activate();
+        }
+
+        /// <summary>Select a blamed line's commit in the main history. Falls back to a hash search
+        /// because a blame can easily name a commit older than the loaded 2000.</summary>
+        private async Task ShowCommitFromBlameAsync(string sha)
+        {
+            await Vm.SelectCommitByHashAsync(sha);
+            if (Vm.SelectedCommit != null)
+                CommitsList.ScrollIntoView(Vm.SelectedCommit);
+        }
+
+        /// <summary>Called when the workspace lets go of a repository, so no blame window is left
+        /// reading from one the user has closed.</summary>
+        public void CloseBlameWindows()
+        {
+            foreach (var window in _blameWindows.ToList())
+                window.Close();
+            _blameWindows.Clear();
+        }
+
+        // ---- Stash (Phase 8, STASH-001..004) ---------------------------------------------------
+
+        private async void StashToolbar_Click(object sender, RoutedEventArgs e)
+            => await ShowStashDialogAsync();
+
+        /// <summary>STASH-001. Also the target of the Actions ▸ Stash menu item.</summary>
+        public async Task ShowStashDialogAsync()
+        {
+            if (!await RequireIdleRepositoryAsync("Stash changes"))
+                return;
+
+            var (tracked, untracked) = await Vm.CountWorkingTreeAsync();
+            if (tracked == 0 && untracked == 0)
+            {
+                // git would exit 0 having stashed nothing; saying so up front beats an error dialog
+                // for something the user did not really ask for.
+                await ShowMessageAsync("Stash changes",
+                    "There is nothing to stash — the working tree is clean.");
+                return;
+            }
+
+            var messageBox = new TextBox
+            {
+                Header = "Message (optional)",
+                PlaceholderText = "Leave blank for git's own \"WIP on <branch>\" text",
+                MinWidth = 420,
+            };
+            var untrackedBox = new CheckBox
+            {
+                Content = $"Include untracked files ({untracked})",
+                IsChecked = false,
+                IsEnabled = untracked > 0,
+            };
+            var keepIndexBox = new CheckBox
+            {
+                Content = "Keep staged changes in the working tree",
+                IsChecked = false,
+            };
+            var hint = new TextBlock
+            {
+                Text = "Stashing parks every change and leaves a clean working tree. Everything "
+                     + "stashed can be brought back with Apply or Pop from the STASHES section.",
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.7,
+                FontSize = 12,
+                MaxWidth = 420,
+            };
+
+            var panel = new StackPanel { Spacing = 8 };
+            panel.Children.Add(messageBox);
+            panel.Children.Add(untrackedBox);
+            panel.Children.Add(keepIndexBox);
+            panel.Children.Add(hint);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Stash changes",
+                Content = panel,
+                PrimaryButtonText = "Stash",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+                return;
+
+            await Vm.SaveStashAsync(messageBox.Text ?? "",
+                                    untrackedBox.IsChecked == true,
+                                    keepIndexBox.IsChecked == true);
+        }
+
+        private async void SidebarStashApply_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item == null) return;
+            await ApplyOrPopStashAsync(item.ShortName, pop: false);
+        }
+
+        private async void SidebarStashPop_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item == null) return;
+            await ApplyOrPopStashAsync(item.ShortName, pop: true);
+        }
+
+        /// <summary>
+        /// STASH-002 / STASH-003. Restoring onto a dirty tree is where stash conflicts come from,
+        /// so that is the case that gets a confirmation. A conflict is then reported rather than
+        /// swallowed: the files are half-merged and the user has to know.
+        /// </summary>
+        private async Task ApplyOrPopStashAsync(string selector, bool pop)
+        {
+            string verb = pop ? "Pop" : "Apply";
+            var (tracked, untracked) = await Vm.CountWorkingTreeAsync();
+            if (tracked + untracked > 0 &&
+                !await ConfirmAsync($"{verb} stash",
+                    $"The working tree already has {tracked + untracked} uncommitted change"
+                    + $"{(tracked + untracked == 1 ? "" : "s")}. Restoring {selector} on top of "
+                    + "them can conflict, leaving files with conflict markers to resolve."
+                    + (pop ? "\n\nOn conflict git keeps the stash entry, so nothing is lost." : ""),
+                    verb))
+            {
+                return;
+            }
+
+            string? error = pop
+                ? await Vm.PopStashAsync(selector, reportError: false)
+                : await Vm.ApplyStashAsync(selector, reportError: false);
+            if (error == null)
+                return;
+
+            if (GitErrorHints.IsConflict(error))
+            {
+                await ShowMessageAsync($"{verb} stash — conflicts",
+                    GitErrorHints.Decorate(error)
+                    + (pop ? "\n\nThe stash entry was kept, so you can drop it once the conflicts "
+                           + "are resolved." : ""));
+            }
+            else
+            {
+                await ShowMessageAsync($"{verb} stash failed", GitErrorHints.Decorate(error));
+            }
+        }
+
+        /// <summary>STASH-004.</summary>
+        private async void SidebarStashDrop_Click(object sender, RoutedEventArgs e)
+        {
+            SidebarItemVM? item = SidebarItemOf(sender);
+            if (item == null) return;
+
+            // The row's label carries an index prefix so identical "WIP on main" messages stay
+            // distinguishable in the sidebar; the dialog already names the selector, so it reads
+            // the entry's own message instead of repeating that.
+            StashEntry? entry = Vm.Stashes.FirstOrDefault(s => s.Selector == item.ShortName);
+            string message = entry?.Message ?? item.Text;
+
+            if (!await ConfirmAsync("Drop stash",
+                    $"Delete {item.ShortName} — “{message}”?\n\nThe changes it holds are not "
+                    + "committed anywhere, so this cannot be undone.",
+                    "Drop"))
+            {
+                return;
+            }
+            await Vm.DropStashAsync(item.ShortName);
         }
 
         /// <summary>TAG-003.</summary>

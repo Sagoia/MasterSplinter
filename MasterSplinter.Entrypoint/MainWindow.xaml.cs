@@ -136,6 +136,20 @@ namespace MasterSplinter.Entrypoint
         private async void ActionsRemotes_Click(object sender, RoutedEventArgs e)
             => await Workspace.ShowRemotesDialogAsync();
 
+        // ---- Merge / rebase (Phase 7) — the same entry points the toolbar and sidebar use -------
+        // No preferred branch from here: the dialogs' pickers default to the first candidate.
+
+        private async void ActionsMerge_Click(object sender, RoutedEventArgs e)
+            => await Workspace.ShowMergeDialogAsync("");
+
+        private async void ActionsRebase_Click(object sender, RoutedEventArgs e)
+            => await Workspace.ShowRebaseDialogAsync("");
+
+        // ---- Stash (Phase 8, STASH-001) --------------------------------------------------------
+
+        private async void ActionsStash_Click(object sender, RoutedEventArgs e)
+            => await Workspace.ShowStashDialogAsync();
+
         // ---- Options dialog (STATUS-006: external editor command) ------------------------------
 
         private async void Options_Click(object sender, RoutedEventArgs e)
@@ -158,9 +172,32 @@ namespace MasterSplinter.Entrypoint
                 Opacity = 0.7,
                 FontSize = 12,
             };
+            // MERGE-004. A NAME, not a command line: git owns the invocation (it has to, because it
+            // is the one creating the BASE/LOCAL/REMOTE temporaries), so all we choose is which of
+            // its tools to ask for.
+            var mergeToolBox = new TextBox
+            {
+                Header = "Merge tool",
+                PlaceholderText = "vscode, kdiff3, p4merge, …",
+                Text = settings.MergeTool,
+                AcceptsReturn = false,
+                MinWidth = 460,
+            };
+            var mergeHint = new TextBlock
+            {
+                Text = "Used by “Resolve using Merge Tool…” on a conflicted file. Leave blank to "
+                     + "use the repository's own merge.tool setting. Run "
+                     + "“git mergetool --tool-help” to list the names git recognizes.",
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.7,
+                FontSize = 12,
+            };
+
             var panel = new StackPanel { Spacing = 8 };
             panel.Children.Add(editorBox);
             panel.Children.Add(hint);
+            panel.Children.Add(mergeToolBox);
+            panel.Children.Add(mergeHint);
 
             var dialog = new ContentDialog
             {
@@ -175,6 +212,7 @@ namespace MasterSplinter.Entrypoint
             if (await dialog.ShowAsync() == ContentDialogResult.Primary)
             {
                 settings.EditorCommand = editorBox.Text?.Trim() ?? "";
+                settings.MergeTool = mergeToolBox.Text?.Trim() ?? "";
                 Git.SettingsStore.Save(settings);
             }
         }

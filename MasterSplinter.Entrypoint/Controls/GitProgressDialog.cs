@@ -12,14 +12,18 @@ using MasterSplinter.Entrypoint.Infrastructure;
 namespace MasterSplinter.Entrypoint.Controls
 {
     /// <summary>
-    /// REMOTE-007: the modal that fronts a fetch/pull/push. Streams git's output into a monospace
-    /// log as it arrives, offers Cancel while the command runs, and — when the command fails —
-    /// stays open with the raw output plus an actionable hint (REMOTE-009).
+    /// REMOTE-007: the modal that fronts a long-running git command. Streams git's output into a
+    /// monospace log as it arrives, offers Cancel while the command runs, and — when the command
+    /// does not succeed — stays open with the raw output plus an actionable hint (REMOTE-009).
+    ///
+    /// Phase 7 shares it with merge/rebase/cherry-pick/revert, which is why it is no longer named
+    /// for the remote commands. Those can end in a third way: stopped on a conflict, which is a
+    /// normal outcome and is titled as such rather than as a failure.
     ///
     /// Built in code rather than XAML to match the other dialogs in this project
     /// (see RepositoryWorkspace's create-branch / create-tag dialogs).
     /// </summary>
-    public static class RemoteProgressDialog
+    public static class GitProgressDialog
     {
         /// <summary>
         /// Shows the dialog, runs <paramref name="operation"/>, and returns git's error text
@@ -181,12 +185,18 @@ namespace MasterSplinter.Entrypoint.Controls
                 }
                 else
                 {
-                    // TortoiseGit's PBST_ERROR: the bar stays, full and red, rather than vanishing.
-                    // A bar that disappears on failure looks like the operation is still starting.
-                    bar.Value = 100;
-                    bar.Foreground = new SolidColorBrush(Microsoft.UI.Colors.OrangeRed);
+                    // A conflict is not a failure — git did exactly what it was asked and stopped
+                    // where it had to. Colouring and titling it like a crash sends the user looking
+                    // for something broken instead of for the files to resolve.
+                    bool conflict = GitErrorHints.IsConflict(error);
 
-                    string? actionable = RemoteErrorHints.HintFor(error);
+                    // TortoiseGit's PBST_ERROR: the bar stays, full and coloured, rather than
+                    // vanishing. A bar that disappears looks like the operation is still starting.
+                    bar.Value = 100;
+                    bar.Foreground = new SolidColorBrush(
+                        conflict ? Microsoft.UI.Colors.Goldenrod : Microsoft.UI.Colors.OrangeRed);
+
+                    string? actionable = GitErrorHints.HintFor(error);
                     if (actionable != null)
                     {
                         hint.Text = actionable;
@@ -202,7 +212,7 @@ namespace MasterSplinter.Entrypoint.Controls
                         log.Append("\n" + error.Trim() + "\n");
                         Render(output, scroller, log);
                     }
-                    dialog.Title = title + " — failed";
+                    dialog.Title = title + (conflict ? " — conflicts" : " — failed");
                     dialog.CloseButtonText = "Close";
                 }
                 finished.TrySetResult(true);

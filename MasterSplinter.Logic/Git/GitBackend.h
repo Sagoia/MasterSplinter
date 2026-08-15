@@ -123,6 +123,114 @@ namespace ms
                          const std::string& branch, bool setUpstream, bool pushTags,
                          const ProgressSink& progress) const;
 
+        // ---- Merge / rebase / cherry-pick / revert (Phase 7) -----------------------------------
+        // Same "OK" / "ERR" US <message> contract. Every one of them runs with the non-interactive
+        // environment (see NonInteractiveEnv) because these are the git commands that open an
+        // editor, and a GUI child blocked on an editor nobody can see never comes back.
+        //
+        // NONE of them force or rewrite beyond what was asked: no --squash, no -X ours/theirs, no
+        // rebase -i, no --autosquash, no --autostash, no --force-rebase. What git refuses reaches
+        // the user as git's own refusal. A guard test pins this.
+
+        // git merge --no-edit [--no-ff] [--no-commit] -- <ref>  (MERGE-001)
+        std::string Merge(const std::string& root, const std::string& refName, bool noFastForward,
+                          bool noCommit, const ProgressSink& progress) const;
+
+        // git rebase <upstream>  (REBASE-001). Non-interactive only.
+        std::string Rebase(const std::string& root, const std::string& upstream,
+                           const ProgressSink& progress) const;
+
+        // git cherry-pick --no-edit [-n] <sha>...  (CHERRY-001/002). Commits are applied in the
+        // order given, so the caller must pass them oldest-first.
+        std::string CherryPick(const std::string& root, const std::vector<std::string>& shas,
+                               bool noCommit, const ProgressSink& progress) const;
+
+        // git revert --no-edit [-m <mainline>] [-n] <sha>  (REVERT-001). `mainline` is 1-based and
+        // 0 means "omit -m"; reverting a MERGE commit requires it, which is why it is plumbed
+        // rather than hardcoded.
+        std::string Revert(const std::string& root, const std::string& sha, int mainline,
+                           bool noCommit, const ProgressSink& progress) const;
+
+        // git <operation> --<action> : the continue/abort/skip half of all four operations
+        // (MERGE-002, REBASE-002). Both arguments are validated against fixed allowlists and
+        // anything else returns ERR without spawning git — deliberately named strings rather than
+        // an int pair, because a silently-swapped integer contract has bitten this ABI before.
+        //   merge       -> continue | abort            (git has no `merge --skip`)
+        //   rebase      -> continue | abort | skip
+        //   cherry-pick -> continue | abort | skip
+        //   revert      -> continue | abort | skip
+        std::string SequencerAction(const std::string& root, const std::string& operation,
+                                    const std::string& action, const ProgressSink& progress) const;
+
+        // git mergetool --no-prompt [--tool=<tool>] -- <path>  (MERGE-004). Git extracts the
+        // BASE/LOCAL/REMOTE temporaries, launches the tool and stages the result itself when the
+        // tool exits cleanly. An empty `tool` leaves the choice to the user's merge.tool config.
+        std::string MergeTool(const std::string& root, const std::string& path,
+                              const std::string& tool, const ProgressSink& progress) const;
+
+        // Whether an operation is half-finished, and how far along it is:
+        //   "OK" US <state> US <detail> US <step> US <total> US <message>
+        // state is one of none | merging | rebasing | cherry-picking | reverting. `detail` names
+        // the branch being rebased (or is empty), step/total are the rebase's position (0 when not
+        // rebasing), and `message` is MERGE_MSG when git has written one (it pre-fills the commit
+        // editor). ERR only when the path is not a repository at all.
+        //
+        // Costs ONE git spawn (rev-parse --absolute-git-dir); the rest is reading that directory.
+        // See the implementation for why this is not five rev-parse calls.
+        std::string RepositoryState(const std::string& root) const;
+
+        // ---- Stash (Phase 8, STASH-001..004) ---------------------------------------------------
+        // `ref` is a stash selector ("stash@{2}") or empty for the most recent entry; anything else
+        // returns ERR without spawning git. NOTE for callers: dropping or popping renumbers every
+        // later entry, so a selector is only valid until the next stash mutation.
+
+        // git stash list --format=... : one record per entry (RS-separated), six US-separated
+        // fields — selector %gd, full sha %H, short sha %h, reflog subject %gs, author ISO date,
+        // author name. Empty string when there are no stashes (and on error).
+        std::string StashList(const std::string& root) const;
+
+        // git stash push [--include-untracked] [--keep-index] [-m <message>]  (STASH-001).
+        // Returns ERR when git stashed nothing — it exits 0 on a clean tree, which would otherwise
+        // read as success. Costs 3 spawns (probe, push, probe); see the implementation.
+        std::string StashSave(const std::string& root, const std::string& message,
+                              bool includeUntracked, bool keepIndex) const;
+
+        // git stash apply|pop|drop [<ref>]  (STASH-002/003/004). A conflicting apply or pop exits
+        // non-zero with the markers already written, so it arrives as ERR carrying git's own text.
+        std::string StashApply(const std::string& root, const std::string& ref) const;
+        std::string StashPop(const std::string& root, const std::string& ref) const;
+        std::string StashDrop(const std::string& root, const std::string& ref) const;
+
+        // ---- Blame (Phase 8, BLAME-001) --------------------------------------------------------
+        // git blame --porcelain [-w] [<move flags>] <rev> -- <path>. Empty `rev` means HEAD.
+        // `detectMoves` is one of "" / "none" (nothing), "file" (-M), "commit" (-C), "any" (-C -C);
+        // anything else is ERR without spawning. Returns "OK" US <raw porcelain> or ERR <message> —
+        // framed unlike the other reads because "path not in that revision" is worth reporting.
+        // A binary file (any NUL in the output) is refused rather than truncated at the marshaller.
+        std::string Blame(const std::string& root, const std::string& rev, const std::string& path,
+                          bool ignoreWhitespace, const std::string& detectMoves) const;
+
+        // ---- Search (Phase 8, SEARCH-001/002) --------------------------------------------------
+        // Records are IDENTICAL to Log's, so the host parses both with one routine.
+        // `mode` selects exactly one git predicate — deliberately one, because git ANDs --grep with
+        // --author instead of ORing them:
+        //   message -> --grep=<query>            author  -> --author=<query>
+        //   content -> -S<query> / -G<query>     path    -> <query> as the pathspec (SEARCH-002)
+        //   hash    -> resolve <query> to a commit and return that one record
+        // `pathFilter` narrows any mode further. Empty query AND empty pathFilter, an unknown mode,
+        // or a hash that resolves to nothing all return "" without a log walk.
+        std::string SearchLog(const std::string& root, const std::string& mode,
+                              const std::string& query, const std::string& pathFilter,
+                              int order, int maxCount, bool matchCase, bool useRegex,
+                              bool allBranches) const;
+
+        // ---- Reflog (Phase 8, REFLOG-001) ------------------------------------------------------
+        // git reflog show --format=... [-n<maxCount>] <ref>; empty `ref` means HEAD. Seven
+        // US-separated fields per RS-separated record: selector %gd, full sha, short sha, reflog
+        // subject %gs ("commit: <subject>"), author ISO date, author name, commit subject %s.
+        // A ref with no reflog exits non-zero and therefore yields "" — an empty list, not an error.
+        std::string Reflog(const std::string& root, const std::string& ref, int maxCount) const;
+
     private:
         // Run `git -C <root> <args...>`, returning the merged stdout/stderr. `code` receives git's
         // exit status (or -1 if the process could not be started). The `input` overload feeds the
@@ -137,6 +245,14 @@ namespace ms
         // Shared shape of fetch/pull/push: --progress + the no-terminal-prompt environment.
         std::string RunNetworkCommand(const std::string& root, std::vector<std::string> args,
                                       const ProgressSink& progress, const char* fallback) const;
+
+        // Shared shape of the Phase 7 commands: the non-interactive environment + a live sink.
+        std::string RunSequencerCommand(const std::string& root, std::vector<std::string> args,
+                                        const ProgressSink& progress, const char* fallback) const;
+
+        // Shared shape of stash apply/pop/drop: validate the selector, then one plain spawn.
+        std::string RunStashCommand(const std::string& root, const char* action,
+                                    const std::string& ref, const char* fallback) const;
 
         std::unique_ptr<IProcessRunner> runner_;
     };

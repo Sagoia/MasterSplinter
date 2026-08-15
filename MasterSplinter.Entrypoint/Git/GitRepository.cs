@@ -76,8 +76,13 @@ namespace MasterSplinter.Entrypoint.Git
         // ---- Commit history --------------------------------------------------------------------
 
         public IReadOnlyList<CommitRow> Log(int order, int maxCount)
+            => ParseCommitRecords(NativeLogic.GitLog(RootPath, order, maxCount));
+
+        /// <summary>The 12-field commit record layout, shared by <see cref="Log"/> and
+        /// <see cref="SearchLog"/> — the native side emits one format string for both, so this is
+        /// the one place that knows the field order.</summary>
+        private static List<CommitRow> ParseCommitRecords(string raw)
         {
-            string raw = NativeLogic.GitLog(RootPath, order, maxCount);
             var commits = new List<CommitRow>();
             foreach (string rec in raw.Split(RS))
             {
@@ -272,23 +277,40 @@ namespace MasterSplinter.Entrypoint.Git
             'R' => FileChangeStatus.Renamed,
             'C' => FileChangeStatus.Renamed,
             '?' => FileChangeStatus.Untracked,
-            _ => FileChangeStatus.Modified, // M, T, U, ...
+            'U' => FileChangeStatus.Conflicted,
+            _ => FileChangeStatus.Modified, // M, T, ...
         };
+
+        /// <summary>
+        /// MERGE-003. The seven porcelain-v1 code pairs that mean "unmerged", per git's own list:
+        /// DD (both deleted), AU (added by us), UD (deleted by them), UA (added by them),
+        /// DU (deleted by us), AA (both added), UU (both modified).
+        ///
+        /// This has to be checked BEFORE the staged/unstaged split, because those two halves both
+        /// see a non-blank column here — a plain "UU" would otherwise be reported as a staged
+        /// modification AND an unstaged one, i.e. the same conflicted file listed twice with no
+        /// hint that anything is wrong.
+        /// </summary>
+        private static bool IsUnmerged(char x, char y)
+            => (x, y) is ('D', 'D') or ('A', 'U') or ('U', 'D') or ('U', 'A')
+                      or ('D', 'U') or ('A', 'A') or ('U', 'U');
 
         // ---- Working tree status (STATUS-001/002) ------------------------------------------------
 
         public sealed record WorkTreeStatus(List<ChangedFile> Staged, List<ChangedFile> Unstaged,
-                                            List<ChangedFile> Untracked);
+                                            List<ChangedFile> Untracked, List<ChangedFile> Conflicted);
 
         /// <summary>
-        /// Snapshot of the working tree: staged / unstaged / untracked entries. A file that is both
-        /// staged and modified again (XY = "MM") appears once in each of the two sections.
+        /// Snapshot of the working tree: conflicted / staged / unstaged / untracked entries. A file
+        /// that is both staged and modified again (XY = "MM") appears once in each of the staged and
+        /// unstaged sections; a conflicted file appears once, in its own section (MERGE-003).
         /// </summary>
         public WorkTreeStatus Status()
         {
             var staged = new List<ChangedFile>();
             var unstaged = new List<ChangedFile>();
             var untracked = new List<ChangedFile>();
+            var conflicted = new List<ChangedFile>();
 
             // porcelain v1 -z records ("XY <path>"), with NUL separators already translated to RS
             // by the native layer. A rename/copy record is followed by one extra record holding the
@@ -322,6 +344,18 @@ namespace MasterSplinter.Entrypoint.Git
                     continue;
                 }
 
+                if (IsUnmerged(x, y))
+                {
+                    conflicted.Add(new ChangedFile
+                    {
+                        Path = path,
+                        Status = FileChangeStatus.Conflicted,
+                        Area = WorkTreeArea.Conflicted,
+                        IsWorkingTree = true,
+                    });
+                    continue;
+                }
+
                 if (x is not ' ' and not '?')
                 {
                     staged.Add(new ChangedFile
@@ -345,7 +379,7 @@ namespace MasterSplinter.Entrypoint.Git
                     });
                 }
             }
-            return new WorkTreeStatus(staged, unstaged, untracked);
+            return new WorkTreeStatus(staged, unstaged, untracked, conflicted);
         }
 
         // ---- Staging & commit (Phase 4, COMMIT-001..007) ---------------------------------------
@@ -492,6 +526,65 @@ namespace MasterSplinter.Entrypoint.Git
                             Func<string, bool>? onProgress)
             => ParseOkErr(NativeLogic.GitPush(RootPath, remote, branch, setUpstream, pushTags, onProgress));
 
+        // ---- Merge / rebase / cherry-pick / revert (Phase 7) -----------------------------------
+        // Each returns null on success, or git's text. A CONFLICT arrives here as an error string
+        // even though it is a normal outcome — callers must refresh regardless and re-read
+        // <see cref="State"/>, because the repository really did change.
+
+        /// <summary>MERGE-001.</summary>
+        public string? Merge(string refName, bool noFastForward, bool noCommit,
+                             Func<string, bool>? onProgress)
+            => ParseOkErr(NativeLogic.GitMerge(RootPath, refName, noFastForward, noCommit, onProgress));
+
+        /// <summary>REBASE-001. Non-interactive, never auto-stashed.</summary>
+        public string? Rebase(string upstream, Func<string, bool>? onProgress)
+            => ParseOkErr(NativeLogic.GitRebase(RootPath, upstream, onProgress));
+
+        /// <summary>CHERRY-001/002. <paramref name="shas"/> must already be oldest-first — git
+        /// applies them left to right.</summary>
+        public string? CherryPick(IEnumerable<string> shas, bool noCommit, Func<string, bool>? onProgress)
+            => ParseOkErr(NativeLogic.GitCherryPick(RootPath, JoinPaths(shas), noCommit, onProgress));
+
+        /// <summary>REVERT-001. <paramref name="mainline"/> is 1-based and required for a merge
+        /// commit; 0 omits it.</summary>
+        public string? Revert(string sha, int mainline, bool noCommit, Func<string, bool>? onProgress)
+            => ParseOkErr(NativeLogic.GitRevert(RootPath, sha, mainline, noCommit, onProgress));
+
+        /// <summary>MERGE-002 / REBASE-002. <paramref name="operation"/> and
+        /// <paramref name="action"/> are validated by the native allowlist.</summary>
+        public string? SequencerAction(string operation, string action, Func<string, bool>? onProgress)
+            => ParseOkErr(NativeLogic.GitSequencerAction(RootPath, operation, action, onProgress));
+
+        /// <summary>MERGE-004. Blank <paramref name="tool"/> defers to the repository's own
+        /// merge.tool configuration.</summary>
+        public string? MergeTool(string path, string tool, Func<string, bool>? onProgress)
+            => ParseOkErr(NativeLogic.GitMergeTool(RootPath, path, tool, onProgress));
+
+        /// <summary>What git is in the middle of, if anything (MERGE-003, REBASE-002). Returns
+        /// <see cref="RepositoryState.None"/> when nothing is in progress or the state could not
+        /// be read — a banner that fails to appear is better than one that lies.</summary>
+        public RepositoryState State()
+        {
+            string[] f = NativeLogic.GitRepositoryState(RootPath).Split(US);
+            if (f.Length < 6 || f[0] != "OK")
+                return RepositoryState.None;
+
+            RepoOperation op = f[1] switch
+            {
+                "merging" => RepoOperation.Merging,
+                "rebasing" => RepoOperation.Rebasing,
+                "cherry-picking" => RepoOperation.CherryPicking,
+                "reverting" => RepoOperation.Reverting,
+                _ => RepoOperation.None,
+            };
+            if (op == RepoOperation.None)
+                return RepositoryState.None;
+
+            int.TryParse(f[3], out int step);
+            int.TryParse(f[4], out int total);
+            return new RepositoryState(op, f[2], step, total, f[5]);
+        }
+
         private static string JoinPaths(IEnumerable<string> paths) => string.Join(RS, paths);
 
         // "OK" -> null; "ERR<US>message" -> message; anything else -> a generic failure.
@@ -529,6 +622,13 @@ namespace MasterSplinter.Entrypoint.Git
         private static readonly Regex HunkRe =
             new(@"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", RegexOptions.Compiled);
 
+        // A COMBINED diff (git's `--cc` output, which is what an unmerged path produces) has one
+        // extra '@' and one extra "-<start>,<len>" per parent: "@@@ -1,3 -1,3 +1,7 @@@". The last
+        // range is still the result side. Matching it is what stops a conflicted file's diff pane
+        // from rendering empty.
+        private static readonly Regex CombinedHunkRe =
+            new(@"^(@{3,}) (?:-(\d+)(?:,\d+)? )+\+(\d+)(?:,\d+)? @{3,}", RegexOptions.Compiled);
+
         public (List<DiffLine> Lines, bool IsBinary) FileDiff(string sha, string path, WhitespaceMode ws)
             => ParseUnifiedDiff(NativeLogic.GitFileDiff(RootPath, sha, path, WsFlag(ws)));
 
@@ -565,6 +665,9 @@ namespace MasterSplinter.Entrypoint.Git
             var lines = new List<DiffLine>();
             int oldNo = 0, newNo = 0;
             bool inHunk = false;
+            // >0 once a combined hunk header has been seen: the number of leading marker columns
+            // (one per parent) each body line carries. 0 means an ordinary two-way diff.
+            int markerColumns = 0;
 
             foreach (string line in raw.Split('\n'))
             {
@@ -572,11 +675,25 @@ namespace MasterSplinter.Entrypoint.Git
 
                 if (l.StartsWith("@@", StringComparison.Ordinal))
                 {
-                    Match m = HunkRe.Match(l);
-                    if (m.Success)
+                    Match combined = CombinedHunkRe.Match(l);
+                    if (combined.Success)
                     {
-                        oldNo = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-                        newNo = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+                        // "@@@" -> 2 parents -> 2 marker columns, "@@@@" -> 3, and so on.
+                        markerColumns = combined.Groups[1].Value.Length - 1;
+                        // Captures[0] is the first parent's range; either side is as good a base as
+                        // the other for the left gutter, and git prints them in parent order.
+                        oldNo = int.Parse(combined.Groups[2].Captures[0].Value, CultureInfo.InvariantCulture);
+                        newNo = int.Parse(combined.Groups[3].Value, CultureInfo.InvariantCulture);
+                    }
+                    else
+                    {
+                        markerColumns = 0;
+                        Match m = HunkRe.Match(l);
+                        if (m.Success)
+                        {
+                            oldNo = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                            newNo = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+                        }
                     }
                     inHunk = true;
                     lines.Add(new DiffLine { Kind = DiffLineKind.Hunk, Text = l });
@@ -588,6 +705,12 @@ namespace MasterSplinter.Entrypoint.Git
 
                 if (l.StartsWith("\\", StringComparison.Ordinal))
                     continue; // "\ No newline at end of file"
+
+                if (markerColumns > 0)
+                {
+                    lines.Add(ParseCombinedLine(l, markerColumns, ref oldNo, ref newNo));
+                    continue;
+                }
 
                 if (l.StartsWith("+", StringComparison.Ordinal))
                 {
@@ -617,12 +740,347 @@ namespace MasterSplinter.Entrypoint.Git
             return (lines, isBinary);
         }
 
+        /// <summary>
+        /// One body line of a combined diff. The first <paramref name="markers"/> characters are
+        /// one marker per parent — '-' where the line is absent from that parent's side, '+' where
+        /// it is new relative to it, ' ' where it is unchanged — and the text starts after them.
+        /// A line removed from any parent is not in the merged result, so it only advances the old
+        /// counter; everything else lands in the result and advances the new one.
+        /// </summary>
+        private static DiffLine ParseCombinedLine(string line, int markers, ref int oldNo, ref int newNo)
+        {
+            string prefix = line.Length >= markers ? line[..markers] : line.PadRight(markers);
+            string text = line.Length > markers ? line[markers..] : "";
+
+            if (prefix.Contains('-'))
+            {
+                var removed = new DiffLine
+                {
+                    Kind = DiffLineKind.Removed,
+                    OldNo = oldNo.ToString(CultureInfo.InvariantCulture),
+                    Text = text,
+                };
+                oldNo++;
+                return removed;
+            }
+
+            if (prefix.Contains('+'))
+            {
+                var added = new DiffLine
+                {
+                    Kind = DiffLineKind.Added,
+                    NewNo = newNo.ToString(CultureInfo.InvariantCulture),
+                    Text = text,
+                };
+                newNo++;
+                return added;
+            }
+
+            var context = new DiffLine
+            {
+                Kind = DiffLineKind.Context,
+                OldNo = oldNo.ToString(CultureInfo.InvariantCulture),
+                NewNo = newNo.ToString(CultureInfo.InvariantCulture),
+                Text = text,
+            };
+            oldNo++;
+            newNo++;
+            return context;
+        }
+
         // ---- File content at a commit ----------------------------------------------------------
 
         public string FileAt(string sha, string path) => NativeLogic.GitFileAtCommit(RootPath, sha, path);
 
         /// <summary>Raw bytes of a file at a commit/ref (binary-safe), for image previews (DIFF-005).</summary>
         public byte[] FileBytesAt(string sha, string path) => NativeLogic.GitFileBytesAtCommit(RootPath, sha, path);
+
+        // ---- Stash (Phase 8, STASH-001..004) ---------------------------------------------------
+
+        /// <summary>
+        /// The stash, newest first (STASH-001). Empty when there are no stashes AND on error —
+        /// a repository that has never stashed is the ordinary case, not a failure worth a banner.
+        /// </summary>
+        /// <remarks>
+        /// The selectors are POSITIONAL: dropping or popping renumbers everything below, so callers
+        /// must re-read this list after any stash mutation rather than reusing a captured entry.
+        /// </remarks>
+        public IReadOnlyList<StashEntry> ListStashes()
+        {
+            string raw = NativeLogic.GitStashList(RootPath);
+            var entries = new List<StashEntry>();
+            int index = 0;
+            foreach (string rec in raw.Split(RS))
+            {
+                string r = rec.Trim('\n', '\r');
+                if (r.Length == 0)
+                    continue;
+                string[] f = r.Split(US);
+                if (f.Length < 6)
+                    continue;
+
+                var (branch, message) = SplitStashSubject(f[3]);
+                entries.Add(new StashEntry(index++, f[0], f[1], f[2], message, branch,
+                                           ParseDate(f[4]), f[5]));
+            }
+            return entries;
+        }
+
+        // git composes a stash's reflog subject as "WIP on <branch>: <sha> <subject>" (or
+        // "On <branch>: <text>" when the user supplied a message). Splitting it gives the sidebar a
+        // branch to show and a message that is not three-quarters boilerplate. Anything that does
+        // not match either shape is kept whole — a custom message is not worth mangling.
+        private static readonly Regex StashSubjectRe =
+            new(@"^(?:WIP on|On) ([^:]+): (.*)$", RegexOptions.Compiled | RegexOptions.Singleline);
+
+        private static (string Branch, string Message) SplitStashSubject(string subject)
+        {
+            Match m = StashSubjectRe.Match(subject);
+            return m.Success ? (m.Groups[1].Value, m.Groups[2].Value) : ("", subject);
+        }
+
+        /// <summary>STASH-001. A blank message lets git compose its own "WIP on &lt;branch&gt;" text.
+        /// Returns an error when the tree was clean — git stashes nothing and still exits 0.</summary>
+        public string? StashSave(string message, bool includeUntracked, bool keepIndex)
+            => ParseOkErr(NativeLogic.GitStashSave(RootPath, NormalizeMessage(message),
+                                                   includeUntracked, keepIndex));
+
+        /// <summary>STASH-002. A conflict comes back as git's own text, with the markers written.</summary>
+        public string? StashApply(string selector)
+            => ParseOkErr(NativeLogic.GitStashApply(RootPath, selector));
+
+        /// <summary>STASH-003. Apply + drop; on conflict git keeps the entry, so nothing is lost.</summary>
+        public string? StashPop(string selector)
+            => ParseOkErr(NativeLogic.GitStashPop(RootPath, selector));
+
+        /// <summary>STASH-004. Irreversible from the UI — confirm before calling.</summary>
+        public string? StashDrop(string selector)
+            => ParseOkErr(NativeLogic.GitStashDrop(RootPath, selector));
+
+        // ---- Blame (Phase 8, BLAME-001) --------------------------------------------------------
+
+        private static string MoveDetectionArg(BlameMoveDetection moves) => moves switch
+        {
+            BlameMoveDetection.WithinFile => "file",
+            BlameMoveDetection.AcrossFiles => "commit",
+            BlameMoveDetection.Aggressive => "any",
+            _ => "none",
+        };
+
+        /// <summary>
+        /// Per-line authorship for one file (BLAME-001). <paramref name="error"/> is null on
+        /// success and carries git's own message otherwise ("no such path in HEAD", "binary file").
+        /// </summary>
+        public IReadOnlyList<BlameLine> Blame(string rev, string path, bool ignoreWhitespace,
+                                              BlameMoveDetection moves, out string? error)
+        {
+            // Split on the FIRST separator only: the payload is file content and may well contain
+            // 0x1F bytes of its own.
+            string[] parts = NativeLogic
+                .GitBlame(RootPath, rev, path, ignoreWhitespace, MoveDetectionArg(moves))
+                .Split(US, 2);
+            if (parts[0] != "OK")
+            {
+                error = parts.Length >= 2 && parts[1].Length > 0
+                    ? parts[1]
+                    : "Could not blame this file.";
+                return Array.Empty<BlameLine>();
+            }
+            error = null;
+            return ParsePorcelainBlame(parts.Length >= 2 ? parts[1] : "", path);
+        }
+
+        /// <summary>
+        /// git blame --porcelain: a header line "&lt;sha&gt; &lt;origLine&gt; &lt;finalLine&gt;
+        /// [&lt;groupSize&gt;]", then key/value headers, then the content line prefixed with a TAB.
+        /// </summary>
+        /// <remarks>
+        /// The commit headers (author, summary, filename) appear only on a commit's FIRST group;
+        /// every later group for the same commit carries the sha alone. Caching them per sha is
+        /// therefore not an optimization — without it, most lines would render with a blank author.
+        /// </remarks>
+        private static List<BlameLine> ParsePorcelainBlame(string porcelain, string blamedPath)
+        {
+            var lines = new List<BlameLine>();
+            var known = new Dictionary<string, (string Author, string Email, DateTimeOffset When,
+                                                string Summary)>(StringComparer.Ordinal);
+            var filenames = new Dictionary<string, string>(StringComparer.Ordinal);
+
+            string sha = "";
+            int origLine = 0, finalLine = 0;
+            string author = "", email = "", summary = "", filename = "";
+            long authorTime = 0;
+            int authorTzMinutes = 0;
+            bool headerPending = false;     // we have a sha and are reading its key/value headers
+            string previousSha = "";
+
+            foreach (string raw in porcelain.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r');
+                if (line.Length == 0)
+                    continue;
+
+                if (line[0] == '\t')
+                {
+                    // The content line closes the group's header block.
+                    if (headerPending && author.Length > 0)
+                        known[sha] = (author, email,
+                                      FromUnixWithOffset(authorTime, authorTzMinutes), summary);
+                    if (headerPending && filename.Length > 0)
+                        filenames[sha] = filename;
+
+                    (string Author, string Email, DateTimeOffset When, string Summary) info =
+                        known.TryGetValue(sha, out var cached)
+                            ? cached
+                            : ("", "", DateTimeOffset.MinValue, "");
+
+                    lines.Add(new BlameLine(
+                        sha,
+                        Short(sha),
+                        info.Author,
+                        info.Email,
+                        info.When,
+                        info.Summary,
+                        // Falls back to the blamed file: without -M/-C every line came from it,
+                        // and the source path is what picks the syntax highlighter.
+                        filenames.TryGetValue(sha, out string? f) ? f : blamedPath,
+                        origLine,
+                        finalLine,
+                        line[1..],
+                        sha != previousSha));
+
+                    previousSha = sha;
+                    headerPending = false;
+                    continue;
+                }
+
+                if (!headerPending)
+                {
+                    // Header line: "<sha> <origLine> <finalLine> [<groupSize>]".
+                    string[] head = line.Split(' ');
+                    if (head.Length < 3)
+                        continue;
+                    sha = head[0];
+                    int.TryParse(head[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out origLine);
+                    int.TryParse(head[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out finalLine);
+                    author = email = summary = filename = "";
+                    authorTime = 0;
+                    authorTzMinutes = 0;
+                    headerPending = true;
+                    continue;
+                }
+
+                int space = line.IndexOf(' ');
+                string key = space < 0 ? line : line[..space];
+                string value = space < 0 ? "" : line[(space + 1)..];
+                switch (key)
+                {
+                    case "author": author = value; break;
+                    case "author-mail": email = value.Trim('<', '>'); break;
+                    case "author-time":
+                        long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out authorTime);
+                        break;
+                    case "author-tz": authorTzMinutes = ParseTimezoneMinutes(value); break;
+                    case "summary": summary = value; break;
+                    case "filename": filename = value; break;
+                }
+            }
+            return lines;
+        }
+
+        // "+0200" / "-0730" as minutes. Anything unrecognized means UTC, which shifts the displayed
+        // time but never loses the date the way a throw would lose the whole file.
+        private static int ParseTimezoneMinutes(string tz)
+        {
+            if (tz.Length != 5 || (tz[0] != '+' && tz[0] != '-'))
+                return 0;
+            if (!int.TryParse(tz.AsSpan(1, 2), NumberStyles.Integer, CultureInfo.InvariantCulture, out int h) ||
+                !int.TryParse(tz.AsSpan(3, 2), NumberStyles.Integer, CultureInfo.InvariantCulture, out int m))
+                return 0;
+            int total = h * 60 + m;
+            return tz[0] == '-' ? -total : total;
+        }
+
+        private static DateTimeOffset FromUnixWithOffset(long unixSeconds, int offsetMinutes)
+        {
+            if (unixSeconds <= 0)
+                return DateTimeOffset.MinValue;
+            try
+            {
+                return DateTimeOffset.FromUnixTimeSeconds(unixSeconds)
+                                     .ToOffset(TimeSpan.FromMinutes(offsetMinutes));
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // A corrupt author-time or a >14h offset must cost one line's timestamp, not the file.
+                return DateTimeOffset.MinValue;
+            }
+        }
+
+        // ---- Search (Phase 8, SEARCH-001/002) --------------------------------------------------
+
+        private static string SearchModeArg(SearchMode mode) => mode switch
+        {
+            SearchMode.Author => "author",
+            SearchMode.Content => "content",
+            SearchMode.Path => "path",
+            SearchMode.Hash => "hash",
+            _ => "message",
+        };
+
+        /// <summary>
+        /// Commit search over the FULL history, unlike the in-memory filter over the loaded log
+        /// (SEARCH-001, SEARCH-002). Returns rows in the same shape as <see cref="Log"/>, so the
+        /// commit list, detail pane and diff viewer all work on the results unchanged.
+        /// An empty list means "no matches" — including for a query git rejected.
+        /// </summary>
+        public IReadOnlyList<CommitRow> SearchLog(SearchMode mode, string query, string pathFilter,
+                                                  int order, int maxCount, bool matchCase,
+                                                  bool useRegex, bool allBranches)
+            => ParseCommitRecords(NativeLogic.GitSearchLog(RootPath, SearchModeArg(mode), query,
+                                                            pathFilter, order, maxCount, matchCase,
+                                                            useRegex, allBranches));
+
+        /// <summary>
+        /// One commit by sha (full or abbreviated), or null if it does not resolve. Used by the
+        /// reflog, whose entries routinely name commits no branch reaches any more and which are
+        /// therefore absent from the loaded log.
+        /// </summary>
+        public CommitRow? CommitByHash(string sha)
+            => SearchLog(SearchMode.Hash, sha, "", 0, 1, true, false, false).FirstOrDefault();
+
+        // ---- Reflog (Phase 8, REFLOG-001) ------------------------------------------------------
+
+        /// <summary>
+        /// Where a ref has been (REFLOG-001); empty <paramref name="refName"/> means HEAD. Empty
+        /// when the ref has no reflog at all, which is an ordinary state rather than an error.
+        /// </summary>
+        public IReadOnlyList<ReflogEntry> Reflog(string refName, int maxCount)
+        {
+            string raw = NativeLogic.GitReflog(RootPath, refName, maxCount);
+            var entries = new List<ReflogEntry>();
+            int index = 0;
+            foreach (string rec in raw.Split(RS))
+            {
+                string r = rec.Trim('\n', '\r');
+                if (r.Length == 0)
+                    continue;
+                string[] f = r.Split(US);
+                if (f.Length < 7)
+                    continue;
+
+                // git packs the operation and its argument into one subject:
+                // "checkout: moving from main to feature" -> ("checkout", "moving from ...").
+                string subject = f[3];
+                int colon = subject.IndexOf(": ", StringComparison.Ordinal);
+                string action = colon > 0 ? subject[..colon] : subject;
+                string detail = colon > 0 ? subject[(colon + 2)..] : "";
+
+                entries.Add(new ReflogEntry(index++, f[0], f[1], f[2], action, detail, f[6],
+                                            ParseDate(f[4]), f[5]));
+            }
+            return entries;
+        }
 
         // ---- Helpers ---------------------------------------------------------------------------
 

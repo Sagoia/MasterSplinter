@@ -210,6 +210,95 @@ namespace MasterSplinter.Entrypoint.Interop
                                                [MarshalAs(UnmanagedType.I1)] bool pushTags,
                                                ProgressFn? cb, IntPtr userData);
 
+        // ---- Merge / rebase / cherry-pick / revert (Phase 7) --------------------------------
+        // Same "OK" / "ERR\x1f<message>" contract and the same progress callback. A conflict comes
+        // back as ERR carrying git's "CONFLICT (…)" text — an expected outcome, not a failure.
+
+        [DllImport(Dll, EntryPoint = "MsGitMerge", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitMerge([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+                                                [MarshalAs(UnmanagedType.I1)] bool noFastForward,
+                                                [MarshalAs(UnmanagedType.I1)] bool noCommit,
+                                                ProgressFn? cb, IntPtr userData);
+
+        [DllImport(Dll, EntryPoint = "MsGitRebase", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRebase([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                 [MarshalAs(UnmanagedType.LPUTF8Str)] string upstream,
+                                                 ProgressFn? cb, IntPtr userData);
+
+        [DllImport(Dll, EntryPoint = "MsGitCherryPick", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitCherryPick([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string shas,
+                                                     [MarshalAs(UnmanagedType.I1)] bool noCommit,
+                                                     ProgressFn? cb, IntPtr userData);
+
+        [DllImport(Dll, EntryPoint = "MsGitRevert", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRevert([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                 [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
+                                                 int mainline,
+                                                 [MarshalAs(UnmanagedType.I1)] bool noCommit,
+                                                 ProgressFn? cb, IntPtr userData);
+
+        [DllImport(Dll, EntryPoint = "MsGitSequencerAction", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitSequencerAction([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string operation,
+                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string action,
+                                                          ProgressFn? cb, IntPtr userData);
+
+        [DllImport(Dll, EntryPoint = "MsGitMergeTool", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitMergeTool([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string tool,
+                                                    ProgressFn? cb, IntPtr userData);
+
+        [DllImport(Dll, EntryPoint = "MsGitRepositoryState", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitRepositoryState([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+
+        // ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------
+
+        [DllImport(Dll, EntryPoint = "MsGitStashList", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitStashList([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+
+        [DllImport(Dll, EntryPoint = "MsGitStashSave", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitStashSave([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string message,
+                                                    [MarshalAs(UnmanagedType.I1)] bool includeUntracked,
+                                                    [MarshalAs(UnmanagedType.I1)] bool keepIndex);
+
+        [DllImport(Dll, EntryPoint = "MsGitStashApply", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitStashApply([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string refName);
+
+        [DllImport(Dll, EntryPoint = "MsGitStashPop", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitStashPop([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                   [MarshalAs(UnmanagedType.LPUTF8Str)] string refName);
+
+        [DllImport(Dll, EntryPoint = "MsGitStashDrop", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitStashDrop([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string refName);
+
+        [DllImport(Dll, EntryPoint = "MsGitBlame", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitBlame([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string rev,
+                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+                                                [MarshalAs(UnmanagedType.I1)] bool ignoreWhitespace,
+                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string detectMoves);
+
+        [DllImport(Dll, EntryPoint = "MsGitSearchLog", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitSearchLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string mode,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string query,
+                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string pathFilter,
+                                                    int order, int maxCount,
+                                                    [MarshalAs(UnmanagedType.I1)] bool matchCase,
+                                                    [MarshalAs(UnmanagedType.I1)] bool useRegex,
+                                                    [MarshalAs(UnmanagedType.I1)] bool allBranches);
+
+        [DllImport(Dll, EntryPoint = "MsGitReflog", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitReflog([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                 [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+                                                 int maxCount);
+
         [DllImport(Dll, EntryPoint = "MsGitFree", CallingConvention = CallingConvention.Cdecl)]
         private static extern void MsGitFree(IntPtr ptr);
 
@@ -251,6 +340,22 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitSetRemoteUrl(string root, string name, string url, bool pushUrl)
             => TakeString(MsGitSetRemoteUrl(root, name, url, pushUrl));
 
+        // ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------
+
+        public static string GitStashList(string root) => TakeString(MsGitStashList(root));
+        public static string GitStashSave(string root, string message, bool includeUntracked, bool keepIndex)
+            => TakeString(MsGitStashSave(root, message, includeUntracked, keepIndex));
+        public static string GitStashApply(string root, string refName) => TakeString(MsGitStashApply(root, refName));
+        public static string GitStashPop(string root, string refName) => TakeString(MsGitStashPop(root, refName));
+        public static string GitStashDrop(string root, string refName) => TakeString(MsGitStashDrop(root, refName));
+        public static string GitBlame(string root, string rev, string path, bool ignoreWhitespace, string detectMoves)
+            => TakeString(MsGitBlame(root, rev, path, ignoreWhitespace, detectMoves));
+        public static string GitSearchLog(string root, string mode, string query, string pathFilter,
+                                          int order, int maxCount, bool matchCase, bool useRegex, bool allBranches)
+            => TakeString(MsGitSearchLog(root, mode, query, pathFilter, order, maxCount, matchCase, useRegex, allBranches));
+        public static string GitReflog(string root, string refName, int maxCount)
+            => TakeString(MsGitReflog(root, refName, maxCount));
+
         /// <summary>
         /// Wraps a managed progress handler as a native callback for the duration of one call.
         /// <paramref name="onOutput"/> receives each chunk of git's output (empty string for the
@@ -288,6 +393,34 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitPush(string root, string remote, string branch, bool setUpstream,
                                      bool pushTags, Func<string, bool>? onOutput)
             => RunWithProgress(onOutput, cb => MsGitPush(root, remote, branch, setUpstream, pushTags, cb, IntPtr.Zero));
+
+        // ---- Merge / rebase / cherry-pick / revert (Phase 7) --------------------------------
+
+        public static string GitMerge(string root, string refName, bool noFastForward, bool noCommit,
+                                      Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitMerge(root, refName, noFastForward, noCommit, cb, IntPtr.Zero));
+
+        public static string GitRebase(string root, string upstream, Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitRebase(root, upstream, cb, IntPtr.Zero));
+
+        /// <summary><paramref name="shas"/> is 0x1E-separated and applied in the order given.</summary>
+        public static string GitCherryPick(string root, string shas, bool noCommit,
+                                           Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitCherryPick(root, shas, noCommit, cb, IntPtr.Zero));
+
+        public static string GitRevert(string root, string sha, int mainline, bool noCommit,
+                                       Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitRevert(root, sha, mainline, noCommit, cb, IntPtr.Zero));
+
+        public static string GitSequencerAction(string root, string operation, string action,
+                                                Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitSequencerAction(root, operation, action, cb, IntPtr.Zero));
+
+        public static string GitMergeTool(string root, string path, string tool,
+                                          Func<string, bool>? onOutput)
+            => RunWithProgress(onOutput, cb => MsGitMergeTool(root, path, tool, cb, IntPtr.Zero));
+
+        public static string GitRepositoryState(string root) => TakeString(MsGitRepositoryState(root));
 
         /// <summary>Raw bytes of a file at a commit/ref (binary-safe; uses an explicit length, not strlen).</summary>
         public static byte[] GitFileBytesAtCommit(string root, string sha, string path)

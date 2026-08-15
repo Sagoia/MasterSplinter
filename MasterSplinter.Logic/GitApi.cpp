@@ -298,6 +298,112 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitPush(const char* root, const char*
                                     MakeSink(cb, userData)));
 }
 
+// ---- Merge / rebase / cherry-pick / revert (Phase 7) ----------------------------------------
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitMerge(const char* root, const char* refName,
+                                                    bool noFastForward, bool noCommit,
+                                                    MsGitProgressFn cb, void* userData)
+{
+    return DupString(Backend().Merge(Str(root), Str(refName), noFastForward, noCommit,
+                                     MakeSink(cb, userData)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRebase(const char* root, const char* upstream,
+                                                     MsGitProgressFn cb, void* userData)
+{
+    return DupString(Backend().Rebase(Str(root), Str(upstream), MakeSink(cb, userData)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCherryPick(const char* root, const char* shas,
+                                                         bool noCommit,
+                                                         MsGitProgressFn cb, void* userData)
+{
+    // SplitPaths is the same 0x1E splitter the staging calls use; the payload here is commit ids
+    // rather than paths, but the separator contract is identical.
+    return DupString(Backend().CherryPick(Str(root), SplitPaths(shas), noCommit,
+                                          MakeSink(cb, userData)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRevert(const char* root, const char* sha,
+                                                     int mainline, bool noCommit,
+                                                     MsGitProgressFn cb, void* userData)
+{
+    return DupString(Backend().Revert(Str(root), Str(sha), mainline, noCommit,
+                                      MakeSink(cb, userData)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitSequencerAction(const char* root,
+                                                              const char* operation,
+                                                              const char* action,
+                                                              MsGitProgressFn cb, void* userData)
+{
+    return DupString(Backend().SequencerAction(Str(root), Str(operation), Str(action),
+                                               MakeSink(cb, userData)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitMergeTool(const char* root, const char* path,
+                                                        const char* tool,
+                                                        MsGitProgressFn cb, void* userData)
+{
+    return DupString(Backend().MergeTool(Str(root), Str(path), Str(tool), MakeSink(cb, userData)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRepositoryState(const char* root)
+{
+    return DupString(Backend().RepositoryState(Str(root)));
+}
+
+// ---- Stash, blame, search, reflog (Phase 8) -------------------------------------------------
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root)
+{
+    return DupString(Backend().StashList(Str(root)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashSave(const char* root, const char* message,
+                                                        bool includeUntracked, bool keepIndex)
+{
+    return DupString(Backend().StashSave(Str(root), Str(message), includeUntracked, keepIndex));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashApply(const char* root, const char* ref)
+{
+    return DupString(Backend().StashApply(Str(root), Str(ref)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashPop(const char* root, const char* ref)
+{
+    return DupString(Backend().StashPop(Str(root), Str(ref)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashDrop(const char* root, const char* ref)
+{
+    return DupString(Backend().StashDrop(Str(root), Str(ref)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitBlame(const char* root, const char* rev,
+                                                    const char* path, bool ignoreWhitespace,
+                                                    const char* detectMoves)
+{
+    return DupString(Backend().Blame(Str(root), Str(rev), Str(path), ignoreWhitespace,
+                                     Str(detectMoves)));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitSearchLog(const char* root, const char* mode,
+                                                        const char* query, const char* pathFilter,
+                                                        int order, int maxCount, bool matchCase,
+                                                        bool useRegex, bool allBranches)
+{
+    return DupString(Backend().SearchLog(Str(root), Str(mode), Str(query), Str(pathFilter),
+                                         order, maxCount, matchCase, useRegex, allBranches));
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref,
+                                                     int maxCount)
+{
+    return DupString(Backend().Reflog(Str(root), Str(ref), maxCount));
+}
+
 extern "C" MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr)
 {
     free(ptr);

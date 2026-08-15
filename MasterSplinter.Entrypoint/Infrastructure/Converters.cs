@@ -39,6 +39,8 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         public const int Cancel = 0xE711;
         public const int Unknown = 0xE9CE;
         public const int Refresh = 0xE72C;
+        public const int Warning = 0xE7BA;
+        public const int History = 0xE81C;
     }
 
     public sealed class BoolToVisibilityConverter : IValueConverter
@@ -97,6 +99,7 @@ namespace MasterSplinter.Entrypoint.Infrastructure
             SidebarKind.WorkingCopy => Glyphs.Of(Glyphs.Folder),
             SidebarKind.Tag => Glyphs.Of(Glyphs.Tag),
             SidebarKind.Remote => Glyphs.Of(Glyphs.Globe),
+            SidebarKind.Reflog => Glyphs.Of(Glyphs.History),
             _ => string.Empty
         };
         public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();
@@ -109,6 +112,15 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();
     }
 
+    /// <summary>Stash rows draw the same vector icon the toolbar's Stash button uses, rather than
+    /// a Segoe glyph — there is no stash glyph in the font that reads as anything but a box.</summary>
+    public sealed class SidebarKindToStashVisibilityConverter : IValueConverter
+    {
+        public object Convert(object value, Type t, object p, string l)
+            => value is SidebarKind.Stash ? Visibility.Visible : Visibility.Collapsed;
+        public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();
+    }
+
     public sealed class StatusToBrushConverter : IValueConverter
     {
         private static readonly SolidColorBrush Added = new(Color.FromArgb(0xFF, 0x2D, 0xA4, 0x4E));
@@ -116,6 +128,9 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         private static readonly SolidColorBrush Deleted = new(Color.FromArgb(0xFF, 0xCF, 0x22, 0x2E));
         private static readonly SolidColorBrush Renamed = new(Color.FromArgb(0xFF, 0x58, 0x6A, 0xE3));
         private static readonly SolidColorBrush Untracked = new(Color.FromArgb(0xFF, 0x82, 0x50, 0xDF));
+        // Conflicted gets the strongest colour in the set on purpose: it is the one row state the
+        // user has to act on before anything else can proceed.
+        private static readonly SolidColorBrush Conflicted = new(Color.FromArgb(0xFF, 0xD1, 0x24, 0x2F));
         public object Convert(object value, Type t, object p, string l) => value switch
         {
             FileChangeStatus.Added => Added,
@@ -123,6 +138,7 @@ namespace MasterSplinter.Entrypoint.Infrastructure
             FileChangeStatus.Deleted => Deleted,
             FileChangeStatus.Renamed => Renamed,
             FileChangeStatus.Untracked => Untracked,
+            FileChangeStatus.Conflicted => Conflicted,
             _ => Modified
         };
         public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();
@@ -140,6 +156,16 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();
     }
 
+    /// <summary>A file path to its ColorCode language id, for blame rows (BLAME-001). The diff
+    /// views resolve this once per file in the view model; blame rows each carry their own source
+    /// path, because -M/-C can pull lines in from a different file entirely.</summary>
+    public sealed class PathToLanguageIdConverter : IValueConverter
+    {
+        public object Convert(object value, Type t, object p, string l)
+            => DiffLanguages.IdForPath(value as string);
+        public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();
+    }
+
     public sealed class StatusToGlyphConverter : IValueConverter
     {
         public object Convert(object value, Type t, object p, string l) => Glyphs.Of(value switch
@@ -149,6 +175,7 @@ namespace MasterSplinter.Entrypoint.Infrastructure
             FileChangeStatus.Deleted => Glyphs.Remove,
             FileChangeStatus.Renamed => Glyphs.Forward,
             FileChangeStatus.Untracked => Glyphs.Unknown,
+            FileChangeStatus.Conflicted => Glyphs.Warning,
             _ => Glyphs.Edit
         });
         public object ConvertBack(object value, Type t, object p, string l) => throw new NotImplementedException();

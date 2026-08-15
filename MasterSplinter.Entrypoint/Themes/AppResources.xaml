@@ -101,9 +101,11 @@
     <inf:LevelToMarginConverter x:Key="LevelToMargin" />
     <inf:SidebarKindToGlyphConverter x:Key="KindToGlyph" />
     <inf:SidebarKindToBranchVisibilityConverter x:Key="KindToBranchVis" />
+    <inf:SidebarKindToStashVisibilityConverter x:Key="KindToStashVis" />
     <inf:StatusToBrushConverter x:Key="StatusToBrush" />
     <inf:StatusToGlyphConverter x:Key="StatusToGlyph" />
     <inf:StringEqualsVisibilityConverter x:Key="StrEqVis" />
+    <inf:PathToLanguageIdConverter x:Key="PathToLang" />
 
     <!-- ===================== Vector git icons (stroke = Foreground) ===================== -->
     <ControlTemplate x:Key="BranchIconTemplate" TargetType="ContentControl">

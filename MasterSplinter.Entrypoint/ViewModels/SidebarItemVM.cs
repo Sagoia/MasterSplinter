@@ -2,7 +2,7 @@ using MasterSplinter.Entrypoint.Infrastructure;
 
 namespace MasterSplinter.Entrypoint.ViewModels
 {
-    public enum SidebarKind { SectionHeader, WorkingCopy, Branch, Tag, Remote, RemoteBranch }
+    public enum SidebarKind { SectionHeader, WorkingCopy, Branch, Tag, Remote, RemoteBranch, Stash, Reflog }
 
     public sealed class SidebarItemVM : ObservableObject
     {

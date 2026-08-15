@@ -3,14 +3,17 @@ using System;
 namespace MasterSplinter.Entrypoint.Infrastructure
 {
     /// <summary>
-    /// REMOTE-009: turns a failed remote command's raw git output into something a user can act on.
+    /// REMOTE-009: turns a failed git command's raw output into something a user can act on.
     ///
     /// Git's failure text is accurate but assumes a terminal ("could not read Username for
     /// 'https://…': terminal prompts disabled" is literally true, and literally unhelpful in a
     /// GUI). Each hint below is one leading sentence naming the fix; the raw output is always kept
     /// underneath, because it is the only thing that can be pasted into a bug report.
+    ///
+    /// Phase 7 widened this past the remote commands: merge/rebase/cherry-pick/revert stopping on
+    /// a conflict lands here too, and it is not a failure — see <see cref="IsConflict"/>.
     /// </summary>
-    public static class RemoteErrorHints
+    public static class GitErrorHints
     {
         /// <summary>The hint for <paramref name="gitOutput"/>, or null when nothing recognizable
         /// is in it (in which case git's own text stands on its own).</summary>
@@ -18,6 +21,37 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         {
             if (string.IsNullOrWhiteSpace(gitOutput))
                 return null;
+
+            // Phase 7, and first: a stopped merge/rebase/cherry-pick/revert is the one "failure"
+            // that is a normal outcome, and the advice for it ("go and resolve") is unlike every
+            // remote hint below.
+            if (IsConflict(gitOutput))
+            {
+                return "Git stopped because the changes overlap. Resolve the conflicted files in "
+                     + "the working copy — the banner at the top of the window carries the "
+                     + "continue and abort actions.";
+            }
+
+            // Phase 8 stash hints, above the remote ones: they share vocabulary ("would be
+            // overwritten") with the checkout refusals further down.
+            if (Has(gitOutput, "No stash entries found") || Has(gitOutput, "No stash found"))
+            {
+                return "There is nothing in the stash. It may have been dropped, or popped from "
+                     + "another window since this list was read.";
+            }
+
+            if (Has(gitOutput, "could not restore untracked files"))
+            {
+                return "Some untracked files in the stash already exist in the working tree, so "
+                     + "git stopped rather than overwrite them. Move or delete them and apply again "
+                     + "— the stash entry is untouched.";
+            }
+
+            if (Has(gitOutput, "is not a stash-like commit") || Has(gitOutput, "is not a valid reference"))
+            {
+                return "That stash entry no longer exists. Stash numbers shift when an entry is "
+                     + "dropped or popped — refresh and try again.";
+            }
 
             // Ordered most-specific first: an SSH key failure also mentions "denied", and a
             // non-fast-forward rejection also mentions "failed to push".
@@ -83,8 +117,8 @@ namespace MasterSplinter.Entrypoint.Infrastructure
             if (Has(gitOutput, "Not possible to fast-forward") || Has(gitOutput, "divergent branches"))
             {
                 return "Your branch and its upstream have diverged, so there is no fast-forward "
-                     + "to make. Merging and rebasing are not available yet — resolve this from a "
-                     + "terminal for now.";
+                     + "to make. Fetch, then merge or rebase the upstream branch into yours "
+                     + "(Actions ▸ Merge… / Rebase…).";
             }
 
             if (Has(gitOutput, "no upstream") || Has(gitOutput, "no tracking information"))
@@ -101,6 +135,27 @@ namespace MasterSplinter.Entrypoint.Infrastructure
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// True when <paramref name="gitOutput"/> is git reporting that a merge, rebase,
+        /// cherry-pick or revert STOPPED on a conflict rather than failing outright. The exit code
+        /// is non-zero either way, so the text is the only thing that separates "you have work to
+        /// do" from "nothing happened" — and the two deserve very different wording.
+        /// </summary>
+        public static bool IsConflict(string? gitOutput)
+        {
+            if (string.IsNullOrWhiteSpace(gitOutput))
+                return false;
+            // "CONFLICT (content):"       — every conflicting merge/cherry-pick/revert/rebase
+            // "Automatic merge failed"    — merge's own summary line
+            // "could not apply <sha>"     — cherry-pick / rebase stopping on a commit
+            // "after resolving the conflicts" — the advice block git prints underneath
+            return Has(gitOutput, "CONFLICT (")
+                || Has(gitOutput, "Automatic merge failed")
+                || Has(gitOutput, "could not apply")
+                || Has(gitOutput, "after resolving the conflicts")
+                || Has(gitOutput, "fix conflicts and then commit");
         }
 
         /// <summary>Git's output with the hint (when there is one) prefixed as its own paragraph.</summary>

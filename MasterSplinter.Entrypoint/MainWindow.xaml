@@ -92,8 +92,9 @@
                     <MenuFlyoutItem Text="Fetch…" Click="ActionsFetch_Click" />
                     <MenuFlyoutSeparator />
                     <MenuFlyoutItem Text="Branch…" Click="ActionsBranch_Click" />
-                    <MenuFlyoutItem Text="Merge…" />
-                    <MenuFlyoutItem Text="Stash" />
+                    <MenuFlyoutItem Text="Merge…" Click="ActionsMerge_Click" />
+                    <MenuFlyoutItem Text="Rebase…" Click="ActionsRebase_Click" />
+                    <MenuFlyoutItem Text="Stash…" Click="ActionsStash_Click" />
                 </MenuBarItem>
                 <MenuBarItem Title="Tools">
                     <MenuFlyoutItem Text="Options…" Click="Options_Click" />

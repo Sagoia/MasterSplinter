@@ -244,9 +244,17 @@
                             <MenuFlyoutItem Tag="checkoutlocal" Text="Check Out as Local Branch…" Click="SidebarCheckoutLocal_Click" />
                             <MenuFlyoutItem Tag="newfrom" Text="Create Branch from Here…" Click="SidebarCreateBranch_Click" />
                             <MenuFlyoutItem Tag="rename" Text="Rename…" Click="SidebarRenameBranch_Click" />
+                            <MenuFlyoutSeparator Tag="sepmerge" />
+                            <!-- Phase 7: both act on the CURRENT branch, using this row as the other side. -->
+                            <MenuFlyoutItem Tag="merge" Text="Merge into Current Branch…" Click="SidebarMerge_Click" />
+                            <MenuFlyoutItem Tag="rebase" Text="Rebase Current Branch onto This…" Click="SidebarRebase_Click" />
+                            <!-- Phase 8, STASH-002/003/004. Apply keeps the entry, Pop removes it. -->
+                            <MenuFlyoutItem Tag="stashapply" Text="Apply Stash" Click="SidebarStashApply_Click" />
+                            <MenuFlyoutItem Tag="stashpop" Text="Pop Stash (apply and remove)" Click="SidebarStashPop_Click" />
                             <MenuFlyoutSeparator Tag="sep" />
                             <MenuFlyoutItem Tag="deletebranch" Text="Delete Branch…" Click="SidebarDeleteBranch_Click" />
                             <MenuFlyoutItem Tag="deletetag" Text="Delete Tag…" Click="SidebarDeleteTag_Click" />
+                            <MenuFlyoutItem Tag="stashdrop" Text="Drop Stash…" Click="SidebarStashDrop_Click" />
                             <MenuFlyoutItem Tag="editremote" Text="Edit Remote URL…" Click="SidebarEditRemote_Click" />
                             <MenuFlyoutItem Tag="copyname" Text="Copy Ref Name" Click="SidebarCopyRefName_Click" />
                         </MenuFlyout>
@@ -262,6 +270,9 @@
                         <ContentControl Template="{StaticResource BranchIconTemplate}" Width="13" Height="13" IsTabStop="False"
                                         Foreground="{ThemeResource TextSecondaryBrush}"
                                         Visibility="{Binding Kind, Converter={StaticResource KindToBranchVis}}" />
+                        <ContentControl Template="{StaticResource StashIconTemplate}" Width="13" Height="13" IsTabStop="False"
+                                        Foreground="{ThemeResource TextSecondaryBrush}"
+                                        Visibility="{Binding Kind, Converter={StaticResource KindToStashVis}}" />
                     </Grid>
                     <TextBlock Grid.Column="2" Margin="6,0,0,0" Text="{Binding Text}" VerticalAlignment="Center" FontSize="13"
                                FontWeight="{Binding IsEmphasized, Converter={StaticResource SelToWeight}}"
@@ -317,7 +328,7 @@
     </UserControl.Resources>
 
     <!-- ============================================================ LAYOUT -->
-    <Grid Background="{ThemeResource AppBackgroundBrush}">
+    <Grid x:Name="RootLayout" Background="{ThemeResource AppBackgroundBrush}">
         <!-- Refresh accelerators live here as well as on the View ▸ Refresh menu item, because
              MenuFlyoutItem accelerators are unreliable in WinUI 3 while the flyout is closed. -->
         <Grid.KeyboardAccelerators>
@@ -327,6 +338,8 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <!-- error bar -->
+            <RowDefinition Height="Auto" />
+            <!-- repository state banner (Phase 7) -->
             <RowDefinition Height="Auto" />
             <!-- command toolbar -->
             <RowDefinition Height="*" />
@@ -338,8 +351,32 @@
                  Title="Git error" Message="{Binding ErrorMessage}"
                  CloseButtonClick="ErrorBar_CloseClick" />
 
+        <!-- ===================== REPOSITORY STATE BANNER (MERGE-002/003, REBASE-002) =====================
+             Visible whenever a merge, rebase, cherry-pick or revert is half-finished. Not closable:
+             the repository really is in this state, and hiding the banner would not change that —
+             the way out is one of the buttons it carries. -->
+        <InfoBar Grid.Row="1" Severity="Warning" IsClosable="False"
+                 IsOpen="{Binding HasActiveOperation, Mode=OneWay}"
+                 Title="{Binding StateTitle}" Message="{Binding StateDetail}">
+            <InfoBar.ActionButton>
+                <Button Content="Resolve…" Click="ResolveConflicts_Click"
+                        Visibility="{Binding HasConflicts, Converter={StaticResource BoolToVis}}" />
+            </InfoBar.ActionButton>
+            <InfoBar.Content>
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,8">
+                    <Button Content="Continue" Click="ContinueOperation_Click"
+                            IsEnabled="{Binding CanResolveOperation, Mode=OneWay}" />
+                    <Button Content="Skip" Click="SkipOperation_Click"
+                            IsEnabled="{Binding CanResolveOperation, Mode=OneWay}"
+                            Visibility="{Binding State.CanSkip, Converter={StaticResource BoolToVis}}" />
+                    <Button Content="Abort" Click="AbortOperation_Click"
+                            IsEnabled="{Binding CanResolveOperation, Mode=OneWay}" />
+                </StackPanel>
+            </InfoBar.Content>
+        </InfoBar>
+
         <!-- ===================== COMMAND TOOLBAR ===================== -->
-        <Border Grid.Row="1" Background="{ThemeResource ToolAreaBrush}" BorderBrush="{ThemeResource DividerBrush}"
+        <Border Grid.Row="2" Background="{ThemeResource ToolAreaBrush}" BorderBrush="{ThemeResource DividerBrush}"
                 BorderThickness="0,0,0,1">
             <Grid Padding="6,3">
                 <Grid.ColumnDefinitions>
@@ -357,8 +394,10 @@
                                     IsEnabled="{Binding CanFetch}" />
                     <Rectangle Width="1" Height="38" Fill="{ThemeResource DividerBrush}" Margin="6,0" />
                     <ctl:ToolButton Vector="branch" Label="Branch" Click="BranchToolbar_Click" />
-                    <ctl:ToolButton Vector="merge" Label="Merge" IsEnabled="False" />
-                    <ctl:ToolButton Vector="stash" Label="Stash" />
+                    <ctl:ToolButton Vector="merge" Label="Merge" Click="MergeToolbar_Click"
+                                    IsEnabled="{Binding CanStartOperation}" />
+                    <ctl:ToolButton Vector="stash" Label="Stash" Click="StashToolbar_Click"
+                                    IsEnabled="{Binding CanStash}" />
                     <ctl:ToolButton Glyph="&#xE7A7;" Label="Discard" IsEnabled="False" />
                     <ctl:ToolButton Glyph="&#xE8EC;" Label="Tag" Click="TagToolbar_Click" />
                 </StackPanel>
@@ -377,7 +416,7 @@
         </Border>
 
         <!-- ===================== MAIN CONTENT (sidebar | right) ===================== -->
-        <Grid Grid.Row="2">
+        <Grid Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="280" MinWidth="200" MaxWidth="460" />
                 <ColumnDefinition Width="12" />
@@ -448,10 +487,36 @@
                                       MinWidth="150" Height="30" />
                             <ProgressRing IsActive="{Binding IsLoading}" Width="16" Height="16" VerticalAlignment="Center" />
                         </StackPanel>
-                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <!-- SEARCH-001/002. Typing filters the loaded log instantly; Enter escalates
+                             to a `git log` query over the whole history (see MainViewModel). -->
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                             <TextBlock Text="Search:" Foreground="{ThemeResource TextSecondaryBrush}" VerticalAlignment="Center" FontSize="12" />
-                            <TextBox PlaceholderText="message, author or SHA" Width="220" Height="30"
+                            <ComboBox ItemsSource="{Binding SearchModeOptions}" MinWidth="118" Height="30"
+                                      SelectedIndex="{Binding SelectedSearchModeIndex, Mode=TwoWay}"
+                                      ToolTipService.ToolTip="Which field Enter searches across the full history" />
+                            <TextBox x:Name="SearchBox" PlaceholderText="filter, or press Enter to search all history"
+                                     Width="240" Height="30" KeyDown="SearchBox_KeyDown"
                                      Text="{Binding SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <Button Style="{StaticResource IconGhostButtonStyle}"
+                                    ToolTipService.ToolTip="Search options" Click="SearchOptions_Click"
+                                    IsEnabled="{Binding CanSearch}">
+                                <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}" Glyph="&#xE713;" FontSize="15"
+                                          Foreground="{ThemeResource TextSecondaryBrush}" />
+                                <FlyoutBase.AttachedFlyout>
+                                    <Flyout x:Name="SearchOptionsFlyout">
+                                        <StackPanel Spacing="10" MinWidth="260">
+                                            <TextBox Header="Limit to path (optional)"
+                                                     PlaceholderText="src/  or  src/App.cs"
+                                                     Text="{Binding SearchPathFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            <CheckBox Content="Match case" IsChecked="{Binding SearchMatchCase, Mode=TwoWay}" />
+                                            <CheckBox Content="Regular expression" IsChecked="{Binding SearchUseRegex, Mode=TwoWay}" />
+                                            <CheckBox Content="Search all branches" IsChecked="{Binding SearchAllBranches, Mode=TwoWay}" />
+                                            <Button Content="Search" Style="{StaticResource AccentButtonStyle}"
+                                                    HorizontalAlignment="Stretch" Click="RunSearch_Click" />
+                                        </StackPanel>
+                                    </Flyout>
+                                </FlyoutBase.AttachedFlyout>
+                            </Button>
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -460,12 +525,20 @@
                 <Grid Grid.Row="1" Background="{ThemeResource PanelBackgroundBrush}">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                     </Grid.RowDefinitions>
 
+                    <!-- SEARCH-001/002: says what the list is showing, since it is no longer the log. -->
+                    <InfoBar Grid.Row="0" Severity="Informational" IsClosable="True"
+                             IsOpen="{Binding IsSearchResultMode, Mode=OneWay}"
+                             CloseButtonClick="SearchBanner_Close"
+                             Message="{Binding SearchBannerText}" />
+
                     <!-- column header -->
-                    <Border Grid.Row="0" Background="{ThemeResource HeaderRowBrush}" BorderBrush="{ThemeResource DividerBrush}"
-                            BorderThickness="0,0,0,1" Height="28">
+                    <Border Grid.Row="1" Background="{ThemeResource HeaderRowBrush}" BorderBrush="{ThemeResource DividerBrush}"
+                            BorderThickness="0,0,0,1" Height="28"
+                            Visibility="{Binding IsReflogMode, Converter={StaticResource InvBoolToVis}}">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="150" />
@@ -482,11 +555,66 @@
                         </Grid>
                     </Border>
 
+                    <!-- reflog rows (REFLOG-001). Swapped with the commit list by IsReflogMode, the
+                         same mutual-exclusion-by-converter the two file lists use below. -->
+                    <Grid Grid.Row="2" Visibility="{Binding IsReflogMode, Converter={StaticResource BoolToVis}}"
+                          RowDefinitions="28,*">
+                        <Border Background="{ThemeResource HeaderRowBrush}" BorderBrush="{ThemeResource DividerBrush}"
+                                BorderThickness="0,0,0,1">
+                            <Grid ColumnDefinitions="110,120,*,150,96">
+                                <TextBlock Text="Entry" Margin="10,0,0,0" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                <TextBlock Grid.Column="1" Text="Action" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                <TextBlock Grid.Column="2" Text="Description" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                <TextBlock Grid.Column="3" Text="Date" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                                <TextBlock Grid.Column="4" Text="Commit" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextSecondaryBrush}" />
+                            </Grid>
+                        </Border>
+                        <ListView x:Name="ReflogList" Grid.Row="1" ItemsSource="{Binding ReflogEntries}"
+                                  SelectionChanged="Reflog_SelectionChanged" SelectionMode="Single" Padding="0"
+                                  ItemContainerStyle="{StaticResource CommitItemStyle}"
+                                  ScrollViewer.HorizontalScrollMode="Disabled"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListView.Resources>
+                                <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#2563EB" />
+                                <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#1D5FD8" />
+                                <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="#1A55C4" />
+                                <SolidColorBrush x:Key="ListViewItemForegroundSelected" Color="#FFFFFF" />
+                            </ListView.Resources>
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid ColumnDefinitions="110,120,*,150,96">
+                                        <Grid.ContextFlyout>
+                                            <MenuFlyout>
+                                                <!-- What makes this a recovery tool rather than a log:
+                                                     both act on a commit nothing may reference any more. -->
+                                                <MenuFlyoutItem Text="Create Branch Here…" Click="ReflogCreateBranch_Click" />
+                                                <MenuFlyoutItem Text="Checkout Commit…" Click="ReflogCheckout_Click" />
+                                                <MenuFlyoutSeparator />
+                                                <MenuFlyoutItem Text="Copy SHA" Click="ReflogCopyHash_Click" />
+                                            </MenuFlyout>
+                                        </Grid.ContextFlyout>
+                                        <TextBlock Text="{Binding Selector}" Margin="10,0,0,0" VerticalAlignment="Center"
+                                                   FontSize="12" FontFamily="Consolas" Opacity="0.8" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Action}" VerticalAlignment="Center"
+                                                   FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="2" Text="{Binding Description}" VerticalAlignment="Center"
+                                                   FontSize="12.5" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="3" Text="{Binding DateText}" VerticalAlignment="Center"
+                                                   FontSize="12" Opacity="0.75" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="4" Text="{Binding ShortSha}" VerticalAlignment="Center"
+                                                   FontSize="12" FontFamily="Consolas" Opacity="0.8" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Grid>
+
                     <!-- commit rows -->
-                    <ListView x:Name="CommitsList" Grid.Row="1" ItemsSource="{Binding Commits}"
+                    <ListView x:Name="CommitsList" Grid.Row="2" ItemsSource="{Binding Commits}"
                               SelectedItem="{Binding SelectedCommit, Mode=OneWay}"
                               SelectionChanged="Commits_SelectionChanged"
-                              SelectionMode="Single" Padding="0"
+                              SelectionMode="Extended" Padding="0"
+                              Visibility="{Binding IsReflogMode, Converter={StaticResource InvBoolToVis}}"
                               ItemContainerStyle="{StaticResource CommitItemStyle}"
                               ScrollViewer.HorizontalScrollMode="Disabled"
                               ScrollViewer.HorizontalScrollBarVisibility="Disabled">
@@ -500,7 +628,7 @@
                             <DataTemplate>
                                 <Grid>
                                     <Grid.ContextFlyout>
-                                        <MenuFlyout>
+                                        <MenuFlyout Opening="CommitMenu_Opening">
                                             <MenuFlyoutItem Text="Copy SHA" Click="CopyShortHash_Click" />
                                             <MenuFlyoutItem Text="Copy Full SHA" Click="CopyFullHash_Click" />
                                             <MenuFlyoutSeparator />
@@ -510,6 +638,12 @@
                                             <MenuFlyoutItem Text="Create Branch Here…" Click="CreateBranchHere_Click" />
                                             <MenuFlyoutItem Text="Create Tag Here…" Click="CreateTagHere_Click" />
                                             <MenuFlyoutItem Text="Checkout Commit…" Click="CheckoutCommit_Click" />
+                                            <MenuFlyoutSeparator />
+                                            <!-- Phase 7. The cherry-pick label is rewritten in
+                                                 CommitMenu_Opening to name how many rows are selected. -->
+                                            <MenuFlyoutItem Tag="cherrypick"
+                                                            Text="Cherry-pick Commit…" Click="CherryPickCommits_Click" />
+                                            <MenuFlyoutItem Tag="revert" Text="Revert Commit…" Click="RevertCommit_Click" />
                                         </MenuFlyout>
                                     </Grid.ContextFlyout>
                                     <Grid.ColumnDefinitions>
@@ -708,12 +842,17 @@
                                         <Grid Padding="12,0" ColumnDefinitions="18,*" DoubleTapped="WorkingFile_DoubleTapped">
                                             <Grid.ContextFlyout>
                                                 <MenuFlyout Opening="WorkingFileMenu_Opening">
+                                                    <!-- MERGE-004: shown only for a conflicted row, where
+                                                         stage/unstage/discard are hidden instead. -->
+                                                    <MenuFlyoutItem Tag="resolve" Text="Resolve using Merge Tool…" Click="ResolveWithMergeTool_Click" />
+                                                    <MenuFlyoutItem Tag="markresolved" Text="Mark Resolved" Click="MarkResolved_Click" />
                                                     <MenuFlyoutItem Tag="stage" Text="Stage File" Click="StageFile_Click" />
                                                     <MenuFlyoutItem Tag="unstage" Text="Unstage File" Click="UnstageFile_Click" />
                                                     <MenuFlyoutItem Tag="discard" Text="Discard Changes…" Click="DiscardFile_Click" />
                                                     <MenuFlyoutSeparator />
                                                     <MenuFlyoutItem Text="Open in External Editor" Click="OpenInEditor_Click" />
                                                     <MenuFlyoutItem Text="Reveal in Explorer" Click="RevealInExplorer_Click" />
+                                                    <MenuFlyoutItem Tag="blame" Text="Blame This File…" Click="BlameWorkingFile_Click" />
                                                     <MenuFlyoutSeparator />
                                                     <MenuFlyoutItem Text="Copy Path" Click="CopyFilePath_Click" />
                                                 </MenuFlyout>
@@ -748,6 +887,7 @@
                                             <Grid.ContextFlyout>
                                                 <MenuFlyout>
                                                     <MenuFlyoutItem Text="Open File at This Commit" Click="OpenFileAtCommit_Click" />
+                                                    <MenuFlyoutItem Text="Blame This File…" Click="BlameFile_Click" />
                                                 </MenuFlyout>
                                             </Grid.ContextFlyout>
                                             <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}" FontSize="12"
@@ -791,7 +931,8 @@
                                              SelectionChanged="ModeBar_SelectionChanged">
                                     <SelectorBarItem x:Name="ModeFileStatus" Text="File Status" />
                                     <SelectorBarItem x:Name="ModeLogHistory" Text="Log / History" IsSelected="True" />
-                                    <SelectorBarItem Text="Search" />
+                                    <SelectorBarItem x:Name="ModeReflog" Text="Reflog" />
+                                    <SelectorBarItem x:Name="ModeSearch" Text="Search" />
                                 </SelectorBar>
                             </Border>
                         </Grid>
@@ -911,7 +1052,7 @@
         </Grid>
 
         <!-- ===================== HOME / EMPTY STATE (CORE-002) ===================== -->
-        <Grid Grid.Row="2" Background="{ThemeResource AppBackgroundBrush}"
+        <Grid Grid.Row="3" Background="{ThemeResource AppBackgroundBrush}"
               Visibility="{Binding HasRepository, Converter={StaticResource InvBoolToVis}}">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="480" Spacing="12">
                 <ContentControl Template="{StaticResource BranchIconTemplate}" Width="44" Height="44"

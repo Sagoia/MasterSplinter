@@ -9,6 +9,12 @@ namespace MasterSplinter.Entrypoint.Git
         /// <summary>External editor command; "{path}" is replaced with the file's absolute path.
         /// Blank means "open with the shell association".</summary>
         public string EditorCommand { get; set; } = "";
+
+        /// <summary>MERGE-004: the merge tool passed to `git mergetool --tool=`. A plain name git
+        /// knows ("vscode", "kdiff3", "p4merge", …) or one configured as mergetool.&lt;name&gt;.cmd.
+        /// Blank defers to the repository's own merge.tool setting, which is the right default —
+        /// a user who has configured git already does not want this box second-guessing it.</summary>
+        public string MergeTool { get; set; } = "";
     }
 
     /// <summary>Persists <see cref="AppSettings"/> as JSON, mirroring RecentRepositoriesStore.</summary>

@@ -31,6 +31,13 @@ namespace MasterSplinter.Entrypoint.ViewModels
         /// <summary>Changed files shown in the bottom panel — the selected commit's, or a compare's.</summary>
         public ObservableCollection<ChangedFile> PanelFiles { get; } = new();
 
+        /// <summary>The stash, newest first (STASH-001). Backs the sidebar's STASHES section.</summary>
+        public ObservableCollection<StashEntry> Stashes { get; } = new();
+
+        /// <summary>HEAD's (or another ref's) movement history, shown in place of the commit list
+        /// while <see cref="IsReflogMode"/> is on (REFLOG-001).</summary>
+        public ObservableCollection<ReflogEntry> ReflogEntries { get; } = new();
+
         public string[] BranchFilterOptions { get; } =
             { "All Branches", "Current Branch" };
         public string[] OrderOptions { get; } =
@@ -55,7 +62,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
             {
                 if (!Set(ref _repository, value)) return;
                 Raise(nameof(HasRepository));
-                RaiseRemoteCommandState();
+                RaiseCommandState();
             }
         }
 
@@ -69,7 +76,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
             {
                 if (!Set(ref _isLoading, value)) return;
                 Raise(nameof(CanCommit));
-                RaiseRemoteCommandState();
+                RaiseCommandState();
             }
         }
 
@@ -344,6 +351,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
         {
             if (_repo == null) return;
             if (IsCompareMode) ClearCompareState();
+            if (IsReflogMode) ExitReflog();
 
             var wc = Sidebar.FirstOrDefault(i => i.Kind == SidebarKind.WorkingCopy);
             if (wc != null)
@@ -399,16 +407,23 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 if (!IsWorkingCopyMode) return; // left the view while loading
 
                 StatusGroups.Clear();
+                // Conflicts first: they are the only rows that block everything else, so they lead
+                // the list rather than being buried under the staged section.
+                AddStatusGroup("Conflicted files", st.Conflicted);
                 AddStatusGroup("Staged files", st.Staged);
                 AddStatusGroup("Unstaged files", st.Unstaged);
                 AddStatusGroup("Untracked files", st.Untracked);
 
-                int total = st.Staged.Count + st.Unstaged.Count + st.Untracked.Count;
+                int total = st.Staged.Count + st.Unstaged.Count + st.Untracked.Count + st.Conflicted.Count;
+                string conflicts = st.Conflicted.Count > 0
+                    ? $"{st.Conflicted.Count} conflicted  ·  "
+                    : "";
                 ChangedSummary = total == 0
                     ? "Working tree clean"
-                    : $"{st.Staged.Count} staged  ·  {st.Unstaged.Count} unstaged  ·  {st.Untracked.Count} untracked";
+                    : $"{conflicts}{st.Staged.Count} staged  ·  {st.Unstaged.Count} unstaged  ·  {st.Untracked.Count} untracked";
 
                 _hasStaged = st.Staged.Count > 0;
+                ConflictCount = st.Conflicted.Count;
                 Raise(nameof(CanCommit));
 
                 ChangedFile? restore = StatusGroups.SelectMany(g => g)
@@ -466,8 +481,11 @@ namespace MasterSplinter.Entrypoint.ViewModels
         }
 
         /// <summary>COMMIT-005: committing is blocked while the subject is empty or there is
-        /// nothing to commit (no staged files, unless amending).</summary>
-        public bool CanCommit => !IsCommitting && !IsLoading
+        /// nothing to commit (no staged files, unless amending) — and, from Phase 7, while any file
+        /// is still conflicted. Git would refuse that commit anyway ("Committing is not possible
+        /// because you have unmerged files"); disabling the button alongside the state banner says
+        /// so before the user writes a message they cannot use.</summary>
+        public bool CanCommit => !IsCommitting && !IsLoading && !HasConflicts
                                  && !string.IsNullOrWhiteSpace(CommitSubject)
                                  && (_hasStaged || IsAmend);
 
@@ -694,24 +712,159 @@ namespace MasterSplinter.Entrypoint.ViewModels
         /// HEAD + branches + remotes + tags list the compare picker uses.</summary>
         public IReadOnlyList<string> StartPointOptions => _refNames;
 
+        // ---- Stash (Phase 8, STASH-001..004) ---------------------------------------------------
+        //
+        // All four go through RunRefMutationAsync, NOT RunStatusMutationAsync. A stash moves
+        // refs/stash, the index AND the working tree, so the log, the sidebar and the status view
+        // all have to be rebuilt — and RunStatusMutationAsync's suppression window exists precisely
+        // to swallow that refresh for index-only writes.
+        //
+        // Its unconditional RefreshAsync() on success is also what keeps the selectors honest:
+        // "stash@{2}" is positional, so every drop and pop renumbers the entries below it.
+
+        public bool HasStashes => Stashes.Count > 0;
+
+        /// <summary>STASH-001. Reports an error when there was nothing to stash (git exits 0).</summary>
+        public Task<string?> SaveStashAsync(string message, bool includeUntracked, bool keepIndex)
+            => RunRefMutationAsync(r => r.StashSave(message, includeUntracked, keepIndex));
+
+        /// <summary>STASH-002. The entry survives; a conflict reaches the caller as git wrote it.</summary>
+        public Task<string?> ApplyStashAsync(string selector, bool reportError = true)
+            => RunRefMutationAsync(r => r.StashApply(selector), reportError);
+
+        /// <summary>STASH-003. On conflict git keeps the entry, so nothing is lost either way.</summary>
+        public Task<string?> PopStashAsync(string selector, bool reportError = true)
+            => RunRefMutationAsync(r => r.StashPop(selector), reportError);
+
+        /// <summary>STASH-004. Irreversible — callers must confirm first.</summary>
+        public Task<string?> DropStashAsync(string selector)
+            => RunRefMutationAsync(r => r.StashDrop(selector));
+
+        // ---- Reflog (Phase 8, REFLOG-001) ------------------------------------------------------
+
+        private const int MaxReflogEntries = 500;
+
+        private bool _isReflogMode;
+        /// <summary>True while the history list shows the reflog instead of the commit log. The
+        /// detail pane and diff viewer stay live: that is the whole point of a recovery tool.</summary>
+        public bool IsReflogMode
+        {
+            get => _isReflogMode;
+            private set => Set(ref _isReflogMode, value);
+        }
+
+        private string _reflogRef = "HEAD";
+        /// <summary>Which ref's reflog is shown. Only HEAD is offered today; the field exists
+        /// because the same list renders any ref's history.</summary>
+        public string ReflogRef
+        {
+            get => _reflogRef;
+            private set => Set(ref _reflogRef, value);
+        }
+
+        /// <summary>Switch the history list to the reflog and load it (REFLOG-001).</summary>
+        public async Task EnterReflogAsync(string refName = "HEAD")
+        {
+            if (_repo == null) return;
+            if (IsCompareMode) ClearCompareState();
+            if (IsWorkingCopyMode) ExitWorkingCopy();
+
+            ReflogRef = string.IsNullOrWhiteSpace(refName) ? "HEAD" : refName;
+            IsReflogMode = true;
+
+            var reflog = Sidebar.FirstOrDefault(i => i.Kind == SidebarKind.Reflog);
+            if (reflog != null)
+            {
+                foreach (var i in Sidebar) i.IsSelected = false;
+                reflog.IsSelected = true;
+            }
+            await LoadReflogAsync();
+        }
+
+        private async Task LoadReflogAsync()
+        {
+            if (_repo == null) return;
+            GitRepository repo = _repo;
+            string refName = ReflogRef;
+            try
+            {
+                var entries = await Task.Run(() => repo.Reflog(refName, MaxReflogEntries));
+                ReflogEntries.Clear();
+                foreach (var e in entries)
+                    ReflogEntries.Add(e);
+            }
+            catch (Exception ex) { ErrorMessage = ex.Message; }
+        }
+
+        /// <summary>Return the history list to the commit log.</summary>
+        public void ExitReflog()
+        {
+            if (!IsReflogMode) return;
+            IsReflogMode = false;
+            ReflogEntries.Clear();
+            SelectedCommit = Commits.FirstOrDefault();
+
+            foreach (var i in Sidebar) i.IsSelected = false;
+            var current = Sidebar.FirstOrDefault(i => i.Kind == SidebarKind.Branch && i.IsCurrent);
+            if (current != null) current.IsSelected = true;
+        }
+
+        /// <summary>
+        /// Show a reflog entry's commit in the detail pane. Looked up by sha rather than found in
+        /// <see cref="Commits"/>, because the commits worth recovering are exactly the ones no
+        /// branch reaches any more — and those never appear in the loaded log.
+        /// </summary>
+        public Task SelectReflogEntryAsync(ReflogEntry entry) => SelectCommitByHashAsync(entry.Sha);
+
+        /// <summary>
+        /// Select the commit with this sha, loading it on demand when it is not in the list. Shared
+        /// by the reflog and by "Show in History" from a blame window — both routinely name commits
+        /// older than the loaded <see cref="MaxCommits"/>, or unreachable altogether.
+        /// </summary>
+        public async Task SelectCommitByHashAsync(string sha)
+        {
+            if (_repo == null || string.IsNullOrWhiteSpace(sha)) return;
+            GitRepository repo = _repo;
+            try
+            {
+                CommitRow? row = Commits.FirstOrDefault(c => c.FullHash == sha)
+                                 ?? await Task.Run(() => repo.CommitByHash(sha));
+                if (row != null)
+                    SelectedCommit = row;
+                else
+                    ErrorMessage = $"Commit {sha} is not in this repository any more.";
+            }
+            catch (Exception ex) { ErrorMessage = ex.Message; }
+        }
+
+        /// <summary>The open repository, for surfaces that read from it directly (the blame window,
+        /// which runs on its own and must not go through this view model's single-selection state).</summary>
+        public GitRepository? CurrentRepository => _repo;
+
         // ---- Remotes (Phase 6, REMOTE-001..009) ------------------------------------------------
 
-        // CanFetch/CanPull/CanPush all depend on repository, loading and busy state, so every
-        // input raises the three together.
-        private void RaiseRemoteCommandState()
+        // Every command gate depends on repository, loading and busy state, so all of them are
+        // raised together whenever one of those inputs moves.
+        private void RaiseCommandState()
         {
             Raise(nameof(CanFetch));
             Raise(nameof(CanPull));
             Raise(nameof(CanPush));
+            Raise(nameof(CanStartOperation));
+            Raise(nameof(CanResolveOperation));
+            Raise(nameof(CanSkipOperation));
+            Raise(nameof(CanStash));
+            Raise(nameof(CanSearch));
         }
 
-        private bool _isRemoteBusy;
-        /// <summary>True while a fetch/pull/push is running: the toolbar's remote buttons are
-        /// disabled so two network commands can never overlap on one repository.</summary>
-        public bool IsRemoteBusy
+        private bool _isGitBusy;
+        /// <summary>True while a command fronted by the progress dialog is running (fetch/pull/push,
+        /// and the Phase 7 merge/rebase/cherry-pick/revert): the commands that would collide with it
+        /// are disabled, so two of them can never overlap on one repository.</summary>
+        public bool IsGitBusy
         {
-            get => _isRemoteBusy;
-            private set { if (Set(ref _isRemoteBusy, value)) RaiseRemoteCommandState(); }
+            get => _isGitBusy;
+            private set { if (Set(ref _isGitBusy, value)) RaiseCommandState(); }
         }
 
         private string _currentBranchName = "";
@@ -720,7 +873,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
         public string CurrentBranchName
         {
             get => _currentBranchName;
-            private set { if (Set(ref _currentBranchName, value)) RaiseRemoteCommandState(); }
+            private set { if (Set(ref _currentBranchName, value)) RaiseCommandState(); }
         }
 
         /// <summary>REMOTE-003/006: the current branch's upstream ("origin/main"), split for the
@@ -733,7 +886,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
             {
                 if (!Set(ref _upstreamName, value)) return;
                 Raise(nameof(HasUpstream));
-                RaiseRemoteCommandState();
+                RaiseCommandState();
             }
         }
         public bool HasUpstream => _upstreamName.Length > 0;
@@ -751,9 +904,23 @@ namespace MasterSplinter.Entrypoint.ViewModels
         }
         public bool HasHeaderTrack => _headerTrackText.Length > 0;
 
-        public bool CanFetch => HasRepository && !IsRemoteBusy && !IsLoading;
-        public bool CanPull => HasRepository && !IsRemoteBusy && !IsLoading && CurrentBranchName.Length > 0;
-        public bool CanPush => HasRepository && !IsRemoteBusy && !IsLoading && CurrentBranchName.Length > 0;
+        public bool CanFetch => HasRepository && !IsGitBusy && !IsLoading;
+        public bool CanPull => HasRepository && !IsGitBusy && !IsLoading && CurrentBranchName.Length > 0;
+        public bool CanPush => HasRepository && !IsGitBusy && !IsLoading && CurrentBranchName.Length > 0;
+
+        /// <summary>Phase 7: a new merge/rebase/cherry-pick/revert can only be started when nothing
+        /// else is half-finished — git refuses otherwise, and offering it invites that refusal.</summary>
+        public bool CanStartOperation => HasRepository && !IsGitBusy && !IsLoading && !HasActiveOperation;
+
+        /// <summary>The continue/abort half: available exactly while something IS in progress.</summary>
+        public bool CanResolveOperation => HasRepository && !IsGitBusy && !IsLoading && HasActiveOperation;
+
+        /// <summary>STASH-001. Stashing mid-merge would park the conflict resolution itself, and
+        /// git's own refusals there are cryptic — the same guard the Phase 7 commands use.</summary>
+        public bool CanStash => HasRepository && !IsGitBusy && !IsLoading && !HasActiveOperation;
+
+        /// <summary>SEARCH-001. A search is a plain read, so only a load can be in its way.</summary>
+        public bool CanSearch => HasRepository && !IsLoading;
 
         /// <summary>REMOTE-001. Read on demand rather than on every refresh: a remote added
         /// outside the app has no refs yet, so the sidebar cannot be the source of truth.</summary>
@@ -789,7 +956,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
         {
             if (_repo == null) return "No repository is open.";
             GitRepository repo = _repo;
-            IsRemoteBusy = true;
+            IsGitBusy = true;
             try
             {
                 string? error = await Task.Run(() => operation(repo));
@@ -797,7 +964,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 return error;
             }
             catch (Exception ex) { return ex.Message; }
-            finally { IsRemoteBusy = false; }
+            finally { IsGitBusy = false; }
         }
 
         /// <summary>REMOTE-002/007. <paramref name="progress"/> is reported from a background
@@ -827,6 +994,263 @@ namespace MasterSplinter.Entrypoint.ViewModels
                     progress.Report(chunk);
                 return !token.IsCancellationRequested;
             };
+
+        // ---- Merge / rebase / cherry-pick / revert (Phase 7) -----------------------------------
+
+        private RepositoryState _state = RepositoryState.None;
+        /// <summary>What git is in the middle of. Drives the state banner (MERGE-002/003,
+        /// REBASE-002) and is re-read after every operation and every repository refresh.</summary>
+        public RepositoryState State
+        {
+            get => _state;
+            private set
+            {
+                if (!Set(ref _state, value)) return;
+                Raise(nameof(HasActiveOperation));
+                Raise(nameof(StateTitle));
+                Raise(nameof(StateDetail));
+                Raise(nameof(CanSkipOperation));
+                RaiseCommandState();
+            }
+        }
+
+        public bool HasActiveOperation => State.IsActive;
+
+        /// <summary>Skip is hidden for a merge — git has no `merge --skip`, and skipping the only
+        /// commit a merge has would just be Abort under a friendlier name.</summary>
+        public bool CanSkipOperation => CanResolveOperation && State.CanSkip;
+
+        private int _conflictCount;
+        /// <summary>How many working-tree files are still conflicted (MERGE-003).</summary>
+        public int ConflictCount
+        {
+            get => _conflictCount;
+            private set
+            {
+                if (!Set(ref _conflictCount, value)) return;
+                Raise(nameof(HasConflicts));
+                Raise(nameof(StateDetail));
+                Raise(nameof(CanCommit));
+            }
+        }
+
+        public bool HasConflicts => _conflictCount > 0;
+
+        /// <summary>Banner headline: what is happening, and to what.</summary>
+        public string StateTitle => State.Op switch
+        {
+            RepoOperation.Merging => State.Detail.Length > 0
+                ? $"Merge in progress ({State.Detail})"
+                : "Merge in progress",
+            RepoOperation.Rebasing => State.Detail.Length > 0
+                ? $"Rebasing {State.Detail}"
+                : "Rebase in progress",
+            RepoOperation.CherryPicking => "Cherry-pick in progress",
+            RepoOperation.Reverting => "Revert in progress",
+            _ => "",
+        };
+
+        /// <summary>Banner subtitle: how far along, and what is in the way.</summary>
+        public string StateDetail
+        {
+            get
+            {
+                if (!State.IsActive)
+                    return "";
+                var parts = new List<string>();
+                if (State.HasSteps)
+                    parts.Add($"step {State.Step} of {State.Total}");
+                parts.Add(HasConflicts
+                    ? $"{_conflictCount} conflicted file{(_conflictCount == 1 ? "" : "s")} to resolve"
+                    : "no conflicts left — continue to finish");
+                return string.Join("  ·  ", parts);
+            }
+        }
+
+        /// <summary>Re-reads the half-finished-operation state. One git spawn; the conflict count
+        /// costs a second one and is only paid for while something is actually in progress.</summary>
+        private async Task LoadStateAsync()
+        {
+            if (_repo == null)
+            {
+                State = RepositoryState.None;
+                ConflictCount = 0;
+                return;
+            }
+            GitRepository repo = _repo;
+            try
+            {
+                RepositoryState state = await Task.Run(() => repo.State());
+                int conflicts = state.IsActive
+                    ? await Task.Run(() => repo.Status().Conflicted.Count)
+                    : 0;
+                State = state;
+                ConflictCount = conflicts;
+                if (state.IsActive)
+                    PrefillOperationMessage(state);
+                else
+                    ClearPrefilledMessage();
+            }
+            catch (Exception ex) { ErrorMessage = ex.Message; }
+        }
+
+        /// <summary>
+        /// Opens the commit editor with the message git already wrote for this operation (MERGE_MSG),
+        /// so a resolved merge commits with "Merge branch 'x'" rather than whatever the user
+        /// invents. Never overwrites typed text — same rule as the amend pre-fill.
+        ///
+        /// A rebase is deliberately excluded: its commits are finished with `rebase --continue`,
+        /// which reuses the original message itself. Pre-filling the editor there would invite a
+        /// commit that does not belong.
+        /// </summary>
+        private void PrefillOperationMessage(RepositoryState state)
+        {
+            if (state.Op == RepoOperation.Rebasing || state.Message.Length == 0)
+                return;
+            if (!string.IsNullOrWhiteSpace(CommitSubject) || !string.IsNullOrWhiteSpace(CommitBody))
+                return;
+
+            string message = state.Message.Replace("\r\n", "\n").Replace('\r', '\n');
+            int blank = message.IndexOf("\n\n", StringComparison.Ordinal);
+            CommitSubject = blank < 0 ? message.Trim() : message[..blank].Trim();
+            CommitBody = blank < 0 ? "" : message[(blank + 2)..].Trim();
+            _prefilledSubject = CommitSubject;
+            _prefilledBody = CommitBody;
+        }
+
+        // What the pre-fill last wrote into the editor, so it can be taken back out again.
+        private string _prefilledSubject = "";
+        private string _prefilledBody = "";
+
+        /// <summary>
+        /// Takes the pre-filled message back out once the operation is over. Without this the
+        /// editor keeps "Merge branch 'x'" after the merge has been committed, and the NEXT
+        /// unrelated commit inherits it. Only clears text the pre-fill itself put there — anything
+        /// the user typed over it is theirs and stays.
+        /// </summary>
+        private void ClearPrefilledMessage()
+        {
+            if (_prefilledSubject.Length == 0 && _prefilledBody.Length == 0)
+                return;
+            if (CommitSubject == _prefilledSubject && CommitBody == _prefilledBody)
+            {
+                CommitSubject = "";
+                CommitBody = "";
+            }
+            _prefilledSubject = "";
+            _prefilledBody = "";
+        }
+
+        /// <summary>
+        /// Shared plumbing for the Phase 7 commands. Like <see cref="RunRemoteMutationAsync"/> it
+        /// refreshes <b>even when the command failed</b> — and here that matters more than anywhere
+        /// else: a merge that stops on a conflict exits non-zero having rewritten the index, moved
+        /// nothing, and left the repository mid-operation. Skipping the refresh would leave the app
+        /// showing a repository that no longer exists.
+        ///
+        /// Errors are returned rather than pushed to the InfoBar; the progress dialog is already
+        /// showing git's output, and a CONFLICT is not an error bar's business.
+        /// </summary>
+        private async Task<string?> RunSequencerMutationAsync(Func<GitRepository, string?> operation)
+        {
+            if (_repo == null) return "No repository is open.";
+            GitRepository repo = _repo;
+            IsGitBusy = true;
+            try
+            {
+                string? error = await Task.Run(() => operation(repo));
+                await RefreshAsync();
+                return error;
+            }
+            catch (Exception ex) { return ex.Message; }
+            finally { IsGitBusy = false; }
+        }
+
+        /// <summary>MERGE-001.</summary>
+        public Task<string?> MergeAsync(string refName, bool noFastForward, bool noCommit,
+                                        IProgress<string> progress, CancellationToken token)
+            => RunSequencerMutationAsync(r => r.Merge(refName, noFastForward, noCommit, Sink(progress, token)));
+
+        /// <summary>REBASE-001.</summary>
+        public Task<string?> RebaseAsync(string upstream, IProgress<string> progress,
+                                         CancellationToken token)
+            => RunSequencerMutationAsync(r => r.Rebase(upstream, Sink(progress, token)));
+
+        /// <summary>CHERRY-001/002. <paramref name="commits"/> may arrive in any order; they are
+        /// applied oldest-first.</summary>
+        public Task<string?> CherryPickAsync(IReadOnlyList<CommitRow> commits, bool noCommit,
+                                             IProgress<string> progress, CancellationToken token)
+        {
+            var shas = OldestFirst(commits).Select(c => c.FullHash).ToList();
+            return shas.Count == 0
+                ? Task.FromResult<string?>("No commits were selected.")
+                : RunSequencerMutationAsync(r => r.CherryPick(shas, noCommit, Sink(progress, token)));
+        }
+
+        /// <summary>REVERT-001. <paramref name="mainline"/> is 1-based; 0 for a non-merge commit.</summary>
+        public Task<string?> RevertAsync(string sha, int mainline, bool noCommit,
+                                         IProgress<string> progress, CancellationToken token)
+            => RunSequencerMutationAsync(r => r.Revert(sha, mainline, noCommit, Sink(progress, token)));
+
+        /// <summary>MERGE-002 / REBASE-002: continue, skip or abort whatever is in progress.</summary>
+        public Task<string?> ContinueOperationAsync(IProgress<string> progress, CancellationToken token)
+            => SequencerActionAsync("continue", progress, token);
+
+        public Task<string?> SkipOperationAsync(IProgress<string> progress, CancellationToken token)
+            => SequencerActionAsync("skip", progress, token);
+
+        public Task<string?> AbortOperationAsync(IProgress<string> progress, CancellationToken token)
+            => SequencerActionAsync("abort", progress, token);
+
+        private Task<string?> SequencerActionAsync(string action, IProgress<string> progress,
+                                                   CancellationToken token)
+        {
+            string command = State.GitCommand;
+            if (command.Length == 0)
+                return Task.FromResult<string?>("Nothing is in progress.");
+            return RunSequencerMutationAsync(r => r.SequencerAction(command, action, Sink(progress, token)));
+        }
+
+        /// <summary>MERGE-004. Git launches the tool and stages the file itself when it exits
+        /// cleanly, so this refreshes like any other status mutation.</summary>
+        public Task<string?> RunMergeToolAsync(ChangedFile file, string tool,
+                                               IProgress<string> progress, CancellationToken token)
+            => RunSequencerMutationAsync(r => r.MergeTool(file.Path, tool, Sink(progress, token)));
+
+        /// <summary>Marks a conflicted file resolved: staging it is exactly what
+        /// "git add &lt;file&gt;" means once the markers are gone, and it is what git's own advice
+        /// tells the user to do.</summary>
+        public Task MarkResolvedAsync(ChangedFile file)
+            => RunStatusMutationAsync(r => r.StagePaths(new[] { file.Path }));
+
+        /// <summary>
+        /// The selected commits in the order git will apply them — public so the confirmation
+        /// dialog can show exactly that order rather than the order they happen to appear in.
+        /// </summary>
+        public IReadOnlyList<CommitRow> OrderForCherryPick(IReadOnlyList<CommitRow> commits)
+            => OldestFirst(commits);
+
+        /// <summary>
+        /// The selected commits in the order git must apply them. The log's own ordering is the
+        /// source of truth — sorting by date would break a picked range whose commits share a
+        /// timestamp or were rewritten out of chronological order. "Reverse Date Order" is the one
+        /// mode that already lists oldest-first; every other mode lists newest-first.
+        /// </summary>
+        private List<CommitRow> OldestFirst(IReadOnlyList<CommitRow> commits)
+        {
+            bool logIsOldestFirst = SelectedOrderIndex == 2;
+            var indexed = commits
+                .Select(c => (Commit: c, Index: _allCommits.IndexOf(c)))
+                .Where(t => t.Index >= 0)
+                .ToList();
+            if (indexed.Count != commits.Count)
+                return commits.ToList(); // a row we cannot place: keep the caller's order rather than guess
+            return (logIsOldestFirst
+                    ? indexed.OrderBy(t => t.Index)
+                    : indexed.OrderByDescending(t => t.Index))
+                .Select(t => t.Commit)
+                .ToList();
+        }
 
         // ---- Binary / image diff (DIFF-005) ----------------------------------------------------
 
@@ -913,14 +1337,187 @@ namespace MasterSplinter.Entrypoint.ViewModels
         public string SearchText
         {
             get => _searchText;
-            set { if (Set(ref _searchText, value)) ApplyFilter(); }
+            set
+            {
+                if (!Set(ref _searchText, value))
+                    return;
+                // While results are showing, typing is composing the NEXT query (Enter runs it) —
+                // filtering the results by it here would narrow them a second time, and in author
+                // or content mode by text that is not in the message at all.
+                if (!IsSearchResultMode)
+                    ApplyFilter();
+            }
         }
 
         private int _selectedOrderIndex;
         public int SelectedOrderIndex
         {
             get => _selectedOrderIndex;
-            set { if (Set(ref _selectedOrderIndex, value)) _ = ReloadLogAsync(); }
+            set
+            {
+                if (!Set(ref _selectedOrderIndex, value))
+                    return;
+                // Order is part of the query, so results are re-run rather than re-sorted.
+                _ = IsSearchResultMode ? LoadSearchResultsAsync() : ReloadLogAsync();
+            }
+        }
+
+        // ---- Git-backed search (Phase 8, SEARCH-001/002) ---------------------------------------
+        //
+        // Two tiers over one search box. Typing keeps the instant in-memory filter above (free, no
+        // process spawn, but blind to anything past MaxCommits); Enter escalates to a `git log`
+        // query over the FULL history, whose results replace the commit list until cleared.
+
+        public string[] SearchModeOptions { get; } =
+            { "Message", "Author", "File content", "Path touched", "Commit hash" };
+
+        private int _selectedSearchModeIndex;
+        public int SelectedSearchModeIndex
+        {
+            get => _selectedSearchModeIndex;
+            set => Set(ref _selectedSearchModeIndex, value);
+        }
+
+        private SearchMode SelectedSearchMode => SelectedSearchModeIndex switch
+        {
+            1 => SearchMode.Author,
+            2 => SearchMode.Content,
+            3 => SearchMode.Path,
+            4 => SearchMode.Hash,
+            _ => SearchMode.Message,
+        };
+
+        private bool _searchMatchCase;
+        public bool SearchMatchCase
+        {
+            get => _searchMatchCase;
+            set => Set(ref _searchMatchCase, value);
+        }
+
+        private bool _searchUseRegex;
+        public bool SearchUseRegex
+        {
+            get => _searchUseRegex;
+            set => Set(ref _searchUseRegex, value);
+        }
+
+        private bool _searchAllBranches = true;
+        /// <summary>On by default, matching the commit list itself (which loads with --all).</summary>
+        public bool SearchAllBranches
+        {
+            get => _searchAllBranches;
+            set => Set(ref _searchAllBranches, value);
+        }
+
+        private string _searchPathFilter = "";
+        public string SearchPathFilter
+        {
+            get => _searchPathFilter;
+            set => Set(ref _searchPathFilter, value ?? "");
+        }
+
+        private bool _isSearchResultMode;
+        /// <summary>True while the commit list holds search results rather than the log.</summary>
+        public bool IsSearchResultMode
+        {
+            get => _isSearchResultMode;
+            private set => Set(ref _isSearchResultMode, value);
+        }
+
+        private string _searchBannerText = "";
+        public string SearchBannerText
+        {
+            get => _searchBannerText;
+            private set => Set(ref _searchBannerText, value);
+        }
+
+        // What produced the current result set, so RefreshAsync can re-run it rather than silently
+        // replacing the results with the ordinary log.
+        private SearchMode _activeSearchMode;
+        private string _activeSearchQuery = "";
+        private string _activeSearchPath = "";
+
+        /// <summary>
+        /// Run the git-backed search (SEARCH-001, SEARCH-002) and show its results in the commit
+        /// list. A blank query with a blank path filter clears the results instead.
+        /// </summary>
+        public async Task RunSearchAsync()
+        {
+            if (_repo == null) return;
+            string query = (SearchText ?? "").Trim();
+            string path = SearchPathFilter.Trim();
+            if (query.Length == 0 && path.Length == 0)
+            {
+                await ClearSearchResultsAsync();
+                return;
+            }
+
+            _activeSearchMode = SelectedSearchMode;
+            _activeSearchQuery = query;
+            _activeSearchPath = path;
+            if (IsReflogMode) ExitReflog();
+
+            await LoadSearchResultsAsync();
+        }
+
+        private async Task LoadSearchResultsAsync()
+        {
+            if (_repo == null) return;
+            GitRepository repo = _repo;
+            SearchMode mode = _activeSearchMode;
+            string query = _activeSearchQuery;
+            string path = _activeSearchPath;
+            int order = SelectedOrderIndex;
+            bool matchCase = SearchMatchCase, useRegex = SearchUseRegex, all = SearchAllBranches;
+
+            ErrorMessage = null;
+            IsLoading = true;
+            try
+            {
+                var results = await Task.Run(() => repo.SearchLog(mode, query, path, order,
+                                                                  MaxCommits, matchCase, useRegex, all));
+                _allCommits = results.ToList();
+                IsSearchResultMode = true;
+                SearchBannerText = DescribeSearch(mode, query, path, results.Count);
+
+                // The in-memory filter would narrow the results by the same text a second time —
+                // and in author/content/path mode that text is not in the message at all, so it
+                // would empty a list that has just been filled.
+                Commits.Clear();
+                foreach (var c in results)
+                    Commits.Add(c);
+                SelectedCommit = Commits.FirstOrDefault();
+            }
+            catch (Exception ex) { ErrorMessage = ex.Message; }
+            finally { IsLoading = false; }
+        }
+
+        private static string DescribeSearch(SearchMode mode, string query, string path, int count)
+        {
+            string what = mode switch
+            {
+                SearchMode.Author => $"author “{query}”",
+                SearchMode.Content => $"changes containing “{query}”",
+                SearchMode.Path => $"commits touching “{query}”",
+                SearchMode.Hash => $"commit {query}",
+                _ => $"message “{query}”",
+            };
+            if (query.Length == 0)
+                what = $"commits touching “{path}”";
+            else if (path.Length > 0)
+                what += $" under “{path}”";
+            return $"{count} result{(count == 1 ? "" : "s")} for {what}";
+        }
+
+        /// <summary>Drop the result set and return to the ordinary log.</summary>
+        public async Task ClearSearchResultsAsync()
+        {
+            if (!IsSearchResultMode) return;
+            IsSearchResultMode = false;
+            SearchBannerText = "";
+            _activeSearchQuery = "";
+            _activeSearchPath = "";
+            await ReloadLogAsync();
         }
 
         // ---- Loading ---------------------------------------------------------------------------
@@ -929,6 +1526,14 @@ namespace MasterSplinter.Entrypoint.ViewModels
         {
             ErrorMessage = null;
             IsLoading = true;
+            // A search or a reflog belongs to the repository that produced it; the tab strip loads
+            // straight into here without closing the old one first.
+            IsSearchResultMode = false;
+            SearchBannerText = "";
+            _activeSearchQuery = "";
+            _activeSearchPath = "";
+            IsReflogMode = false;
+            ReflogEntries.Clear();
             try
             {
                 string? error = null;
@@ -953,10 +1558,13 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 Recent.Clear();
                 foreach (var r in recent) Recent.Add(r);
 
-                // Sidebar + ref caches from real refs.
-                ApplyRefs(await Task.Run(() => repo.ListRefs()));
+                // Sidebar + ref caches from real refs, plus the stash (one extra spawn, and the
+                // sidebar section it feeds sits alongside the ref sections).
+                var loaded = await Task.Run(() => (Refs: repo.ListRefs(), Stashes: repo.ListStashes()));
+                ApplyRefs(loaded.Refs, loaded.Stashes);
 
                 await ReloadLogAsync();
+                await LoadStateAsync(); // a repository can be opened mid-merge (Phase 7)
             }
             catch (Exception ex)
             {
@@ -975,6 +1583,8 @@ namespace MasterSplinter.Entrypoint.ViewModels
             GitRepository repo = _repo;
             string? prevSha = SelectedCommit?.FullHash;
             bool wasWorkingCopy = IsWorkingCopyMode;
+            bool wasReflog = IsReflogMode;
+            bool wasSearch = IsSearchResultMode;
 
             ErrorMessage = null;
             IsLoading = true;
@@ -990,19 +1600,33 @@ namespace MasterSplinter.Entrypoint.ViewModels
                     Repository = reopened.ToInfo();
                 }
 
-                ApplyRefs(await Task.Run(() => repo.ListRefs()));
+                var loaded = await Task.Run(() => (Refs: repo.ListRefs(), Stashes: repo.ListStashes()));
+                ApplyRefs(loaded.Refs, loaded.Stashes);
 
-                var commits = await Task.Run(() => repo.Log(SelectedOrderIndex, MaxCommits));
-                _allCommits = commits.ToList();
-                ApplyFilter();
-                // Rebuilt rows are new objects, so restore the selection by hash; the fresh row
-                // lazily reloads its files/diff, which is exactly what a refresh should do.
-                SelectedCommit = (prevSha != null ? Commits.FirstOrDefault(c => c.FullHash == prevSha) : null)
-                                 ?? Commits.FirstOrDefault();
+                if (!wasSearch)
+                {
+                    var commits = await Task.Run(() => repo.Log(SelectedOrderIndex, MaxCommits));
+                    _allCommits = commits.ToList();
+                    ApplyFilter();
+                    // Rebuilt rows are new objects, so restore the selection by hash; the fresh row
+                    // lazily reloads its files/diff, which is exactly what a refresh should do.
+                    SelectedCommit = (prevSha != null ? Commits.FirstOrDefault(c => c.FullHash == prevSha) : null)
+                                     ?? Commits.FirstOrDefault();
+                }
             }
             catch (Exception ex) { ErrorMessage = ex.Message; }
             finally { IsLoading = false; }
 
+            // Results are re-run rather than replaced by the plain log: a refresh triggered by an
+            // unrelated commit must not silently throw away the search the user is looking at.
+            if (wasSearch)
+                await LoadSearchResultsAsync();
+
+            // After IsLoading clears, so the banner's command gates settle on their final values.
+            await LoadStateAsync();
+
+            if (wasReflog)
+                await LoadReflogAsync();      // the whole point is that it moved
             if (wasWorkingCopy)
                 await EnterWorkingCopyAsync(); // restore the working-copy view with fresh status
         }
@@ -1042,11 +1666,24 @@ namespace MasterSplinter.Entrypoint.ViewModels
             Sidebar.Clear();
             ClearCompareState();
             IsWorkingCopyMode = false;
+            IsReflogMode = false;
+            ReflogEntries.Clear();
+            Stashes.Clear();
+            Raise(nameof(HasStashes));
+            IsSearchResultMode = false;
+            SearchBannerText = "";
+            _activeSearchQuery = "";
+            _activeSearchPath = "";
+            SearchPathFilter = "";
             StatusGroups.Clear();
             CommitSubject = "";
             CommitBody = "";
             IsAmend = false;
             _hasStaged = false;
+            State = RepositoryState.None;
+            ConflictCount = 0;
+            _prefilledSubject = "";
+            _prefilledBody = "";
             _markedCommit = null;
             Raise(nameof(HasMarkedCommit));
             PanelFiles.Clear();
@@ -1254,9 +1891,14 @@ namespace MasterSplinter.Entrypoint.ViewModels
 
         /// <summary>Push a freshly-read ref set into the sidebar, the compare picker, and the
         /// caches the branch/tag dialogs read. Called from both load and refresh.</summary>
-        private void ApplyRefs(GitRepository.RefList refs)
+        private void ApplyRefs(GitRepository.RefList refs, IReadOnlyList<StashEntry> stashes)
         {
-            BuildSidebar(refs);
+            Stashes.Clear();
+            foreach (var s in stashes)
+                Stashes.Add(s);
+            Raise(nameof(HasStashes));
+
+            BuildSidebar(refs, stashes);
 
             // Ref names for the compare-refs picker (DIFF-007) and the create-branch start point
             // (BR-004): HEAD + branches + remotes + tags.
@@ -1295,7 +1937,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
             return slash < 0 ? ("", upstream) : (upstream[..slash], upstream[(slash + 1)..]);
         }
 
-        private void BuildSidebar(GitRepository.RefList refs)
+        private void BuildSidebar(GitRepository.RefList refs, IReadOnlyList<StashEntry> stashes)
         {
             Sidebar.Clear();
 
@@ -1307,6 +1949,9 @@ namespace MasterSplinter.Entrypoint.ViewModels
             AddPlain("FILE STATUS", SidebarKind.SectionHeader, 0, null);
             var fileStatus = Sidebar[^1];
             AddPlain("Working Copy", SidebarKind.WorkingCopy, 1, fileStatus);
+            // REFLOG-001. Lives beside Working Copy rather than in its own section: like the
+            // working copy it is a VIEW of this repository, not a ref you can act on.
+            AddPlain("Reflog", SidebarKind.Reflog, 1, fileStatus);
 
             AddPlain("BRANCHES", SidebarKind.SectionHeader, 0, null);
             var branches = Sidebar[^1];
@@ -1341,6 +1986,28 @@ namespace MasterSplinter.Entrypoint.ViewModels
                         Kind = SidebarKind.Tag,
                         Level = 1,
                         ParentItem = tags,
+                    });
+            }
+
+            if (stashes.Count > 0)
+            {
+                AddPlain("STASHES", SidebarKind.SectionHeader, 0, null);
+                var stashHeader = Sidebar[^1];
+                foreach (var s in stashes)
+                    Add(new SidebarItemVM
+                    {
+                        // The selector is what apply/pop/drop take, and it is POSITIONAL — these
+                        // rows are rebuilt on every refresh precisely because a drop renumbers them.
+                        // It is shown as well as stored: which entry a row IS matters when the
+                        // messages are git's own "WIP on main" boilerplate and read alike.
+                        Text = s.Message.Length > 0 ? $"{{{s.Index}}}  {s.Message}" : s.Selector,
+                        ShortName = s.Selector,
+                        RefName = s.Selector,
+                        Sha = s.Sha,
+                        Upstream = s.Branch,
+                        Kind = SidebarKind.Stash,
+                        Level = 1,
+                        ParentItem = stashHeader,
                     });
             }
 
@@ -1394,6 +2061,11 @@ namespace MasterSplinter.Entrypoint.ViewModels
             if (item.Kind == SidebarKind.WorkingCopy)
             {
                 _ = EnterWorkingCopyAsync(); // STATUS-001: switch to the working-copy view
+                return;
+            }
+            if (item.Kind == SidebarKind.Reflog)
+            {
+                _ = EnterReflogAsync(); // REFLOG-001
                 return;
             }
             if (item.IsExpandable) ToggleSidebar(item); // e.g. a remote node

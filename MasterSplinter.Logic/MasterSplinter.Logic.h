@@ -212,6 +212,143 @@ extern "C" {
 	                                        bool setUpstream, bool pushTags,
 	                                        MsGitProgressFn cb, void* userData);
 
+	// ---- Merge / rebase / cherry-pick / revert (Phase 7) ----------------------------------------
+	// Same "OK" / "ERR\x1f<message>" contract, and the same optional progress callback as the
+	// network commands (these stream too, and a rebase over many commits can take a while).
+	//
+	// All of them run with GIT_EDITOR=true, GIT_SEQUENCE_EDITOR=true and GIT_TERMINAL_PROMPT=0:
+	// these are the git commands that open an editor, and a GUI child blocked on an editor nobody
+	// can see never returns. None of them force — no --squash, no -X ours/theirs, no rebase -i, no
+	// --autosquash, no --autostash — so whatever git refuses reaches the user as git's own words.
+	//
+	// A conflict is reported as ERR (git exits non-zero), but it is a NORMAL outcome: the payload
+	// is git's "CONFLICT (…)" text and the repository is left mid-operation on purpose. Callers
+	// must refresh even on ERR, and use MsGitRepositoryState to find out where things stand.
+
+	// git merge --no-edit [--no-ff] [--no-commit] -- <ref>
+	MASTERSPLINTERLOGIC_API char* MsGitMerge(const char* root, const char* refName,
+	                                         bool noFastForward, bool noCommit,
+	                                         MsGitProgressFn cb, void* userData);
+
+	// git rebase <upstream> — non-interactive only.
+	MASTERSPLINTERLOGIC_API char* MsGitRebase(const char* root, const char* upstream,
+	                                          MsGitProgressFn cb, void* userData);
+
+	// git cherry-pick --no-edit [-n] <sha>... ; `shas` holds one or more commit ids separated by
+	// 0x1E, applied in the order given (so the caller passes them OLDEST FIRST).
+	MASTERSPLINTERLOGIC_API char* MsGitCherryPick(const char* root, const char* shas,
+	                                              bool noCommit,
+	                                              MsGitProgressFn cb, void* userData);
+
+	// git revert --no-edit [-m <mainline>] [-n] <sha>. `mainline` is 1-based; 0 omits -m. Reverting
+	// a merge commit REQUIRES it (git cannot guess which side to keep), and passing it for an
+	// ordinary commit is an error — hence the explicit 0.
+	MASTERSPLINTERLOGIC_API char* MsGitRevert(const char* root, const char* sha, int mainline,
+	                                          bool noCommit, MsGitProgressFn cb, void* userData);
+
+	// git <operation> --<action>: the continue/abort/skip half of all four operations. Both
+	// arguments are validated against fixed allowlists and anything else returns ERR without
+	// spawning git. Named strings rather than an int pair on purpose — a silently-swapped integer
+	// contract has cost this ABI a shipped bug before (see MsGitWorkTreeFileDiff's `area`).
+	//   operation "merge"                              -> action "continue" | "abort"
+	//   operation "rebase" | "cherry-pick" | "revert"  -> action "continue" | "abort" | "skip"
+	MASTERSPLINTERLOGIC_API char* MsGitSequencerAction(const char* root, const char* operation,
+	                                                   const char* action,
+	                                                   MsGitProgressFn cb, void* userData);
+
+	// git mergetool --no-prompt [--tool=<tool>] -- <path>. Git extracts the BASE/LOCAL/REMOTE
+	// temporaries, launches the tool, and stages the file itself when the tool exits cleanly. An
+	// empty `tool` leaves the choice to the user's own merge.tool configuration. The call does not
+	// return until the tool exits, so it always wants the progress callback (to stay cancellable).
+	MASTERSPLINTERLOGIC_API char* MsGitMergeTool(const char* root, const char* path,
+	                                             const char* tool,
+	                                             MsGitProgressFn cb, void* userData);
+
+	// Whether an operation is half-finished, and how far along:
+	//   "OK\x1f<state>\x1f<detail>\x1f<step>\x1f<total>\x1f<message>"
+	//   state   none | merging | rebasing | cherry-picking | reverting
+	//   detail  the branch being rebased, or the short sha of MERGE_HEAD/CHERRY_PICK_HEAD/
+	//           REVERT_HEAD; empty when state is none
+	//   step    the rebase's current commit, total its last (both 0 when not rebasing)
+	//   message MERGE_MSG with git's "# Conflicts:" comment lines removed — what the commit
+	//           editor should open with; empty when state is none
+	// "ERR\x1f<message>" only when the path is not a repository at all.
+	MASTERSPLINTERLOGIC_API char* MsGitRepositoryState(const char* root);
+
+	// ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------------
+
+	// One record per stash entry (records separated by 0x1E, fields by 0x1F), newest first:
+	//   0 selector    "stash@{0}"  -- what apply/pop/drop take
+	//   1 sha         the stash commit's full hash
+	//   2 shortSha
+	//   3 message     git's reflog subject: "WIP on main: 1a2b3c4 <subject>" or "On main: <text>"
+	//   4 dateISO     author date of the stash commit
+	//   5 author
+	// Empty string when there are no stashes, and on error — an empty list either way.
+	// NOTE: dropping or popping RENUMBERS every later entry, so a selector is only valid until the
+	// next stash mutation. Callers must re-read this list after any of the three.
+	MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root);
+
+	// git stash push [--include-untracked] [--keep-index] [-m <message>]; "OK" / "ERR\x1f<message>".
+	// A blank `message` omits -m and lets git compose its own "WIP on <branch>" text.
+	// Returns ERR when git stashed NOTHING: `git stash push` exits 0 on a clean tree, and reporting
+	// that as success would tell the user their work was parked when it is still sitting there.
+	MASTERSPLINTERLOGIC_API char* MsGitStashSave(const char* root, const char* message,
+	                                             bool includeUntracked, bool keepIndex);
+
+	// git stash apply|pop|drop [<ref>]; "OK" / "ERR\x1f<message>". `ref` is a selector from
+	// MsGitStashList, or empty for the most recent entry; anything not matching "stash@{<digits>}"
+	// returns ERR without spawning git. A conflicting apply/pop exits non-zero with the markers
+	// already written, so it arrives as ERR carrying git's own conflict text.
+	MASTERSPLINTERLOGIC_API char* MsGitStashApply(const char* root, const char* ref);
+	MASTERSPLINTERLOGIC_API char* MsGitStashPop(const char* root, const char* ref);
+	MASTERSPLINTERLOGIC_API char* MsGitStashDrop(const char* root, const char* ref);
+
+	// git blame --porcelain [-w] [<move flags>] <rev> -- <path>; empty `rev` means HEAD.
+	// detectMoves selects how hard git looks for moved/copied lines — a NAME, not an int:
+	//   "" | "none"  no detection      "file"    -M      (moved within this file)
+	//   "commit"     -C                "any"     -C -C   (also from files the commit created)
+	// Anything else returns ERR without spawning git.
+	//
+	// Returns "OK\x1f<raw --porcelain output>" or "ERR\x1f<message>". This read is OK/ERR-framed
+	// (unlike MsGitLog and friends) because "that path is not in that revision" is a routine,
+	// actionable failure whose message is worth keeping. Split on the FIRST 0x1F only: the payload
+	// is file content and may contain 0x1F bytes of its own.
+	//
+	// A binary file is refused with ERR rather than returned: --porcelain content lines are raw
+	// file bytes, and a NUL would truncate the whole payload at the managed marshaller.
+	MASTERSPLINTERLOGIC_API char* MsGitBlame(const char* root, const char* rev, const char* path,
+	                                         bool ignoreWhitespace, const char* detectMoves);
+
+	// Commit search. Records are byte-identical to MsGitLog's 12-field layout, so one host-side
+	// parser serves both. `mode` picks exactly ONE git predicate — deliberately one, because git
+	// ANDs --grep with --author rather than ORing them, so a combined "message or author" search
+	// would silently return the intersection:
+	//   "message"  --grep=<query>       (--fixed-strings unless useRegex)
+	//   "author"   --author=<query>
+	//   "content"  -S<query>, or -G<query> when useRegex (search the diff text itself)
+	//   "path"     <query> is used as the pathspec — "which commits touched this file"
+	//   "hash"     resolve <query> to a commit and return just that one record
+	// `pathFilter` narrows any mode further (appended after --). matchCase=false adds
+	// --regexp-ignore-case; allBranches adds --all; `order` and `maxCount` are as in MsGitLog.
+	//
+	// Empty string — with no log walk — for: an unknown mode, a blank query AND blank pathFilter,
+	// or a "hash" query that resolves to nothing (a typo must not surface as git's error text
+	// rendered into the commit list).
+	MASTERSPLINTERLOGIC_API char* MsGitSearchLog(const char* root, const char* mode,
+	                                             const char* query, const char* pathFilter,
+	                                             int order, int maxCount, bool matchCase,
+	                                             bool useRegex, bool allBranches);
+
+	// git reflog show [-n<maxCount>] <ref>; empty `ref` means HEAD. One record per entry (0x1E),
+	// seven 0x1F-separated fields:
+	//   0 selector   "HEAD@{3}"
+	//   1 sha        2 shortSha
+	//   3 reflogSubject  "commit: <subject>" / "pull: Fast-forward" / "checkout: moving from..."
+	//   4 dateISO    5 author    6 commitSubject  (%s — often fuller than the reflog subject)
+	// A ref with no reflog makes git exit non-zero, which yields "" — an empty list, not an error.
+	MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref, int maxCount);
+
 	// Frees any char* returned by the MsGit* functions above.
 	MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr);
 }

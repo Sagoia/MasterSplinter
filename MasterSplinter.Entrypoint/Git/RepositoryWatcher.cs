@@ -89,11 +89,23 @@ namespace MasterSplinter.Entrypoint.Git
                 if (p.EndsWith(".lock", StringComparison.OrdinalIgnoreCase))
                     return; // in-flight git operations; the final write triggers separately
                 string inGit = p.Length > 5 ? p[5..] : "";
+                // The *_HEAD files and the rebase directories are how a half-finished merge,
+                // rebase, cherry-pick or revert announces itself (Phase 7). Without them the state
+                // banner would only appear on the next unrelated refresh — so an operation started
+                // from a terminal alongside the app would go unnoticed.
                 bool significant = inGit.Equals("index", StringComparison.OrdinalIgnoreCase)
                     || inGit.Equals("HEAD", StringComparison.OrdinalIgnoreCase)
                     || inGit.Equals("packed-refs", StringComparison.OrdinalIgnoreCase)
                     || inGit.Equals("MERGE_HEAD", StringComparison.OrdinalIgnoreCase)
+                    || inGit.Equals("MERGE_MSG", StringComparison.OrdinalIgnoreCase)
+                    || inGit.Equals("CHERRY_PICK_HEAD", StringComparison.OrdinalIgnoreCase)
+                    || inGit.Equals("REVERT_HEAD", StringComparison.OrdinalIgnoreCase)
+                    || inGit.Equals("REBASE_HEAD", StringComparison.OrdinalIgnoreCase)
                     || inGit.Equals("ORIG_HEAD", StringComparison.OrdinalIgnoreCase)
+                    || inGit.StartsWith("rebase-merge\\", StringComparison.OrdinalIgnoreCase)
+                    || inGit.StartsWith("rebase-apply\\", StringComparison.OrdinalIgnoreCase)
+                    || inGit.Equals("rebase-merge", StringComparison.OrdinalIgnoreCase)
+                    || inGit.Equals("rebase-apply", StringComparison.OrdinalIgnoreCase)
                     || inGit.StartsWith("refs\\", StringComparison.OrdinalIgnoreCase);
                 if (!significant)
                     return; // objects, logs, hooks, ... — noise
