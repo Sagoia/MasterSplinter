@@ -432,7 +432,7 @@ TEST(Status, BuildsPorcelainArgs)
     h.fake->SetResponse("", 0);
     h.backend->Status("root");
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "--no-optional-locks", "-c", "core.quotePath=false",
+              (Args{ "-C", "root", "-c", "core.quotePath=false",
                      "status", "--porcelain=v1", "-z", "--untracked-files=all" }));
 }
 
@@ -475,7 +475,7 @@ TEST(WorkTreeFileDiff, UnstagedArgs)
     h.fake->SetResponse("", 0);
     h.backend->WorkTreeFileDiff("root", "f.cs", 0, 0);
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "--no-optional-locks", "diff", "--no-color", "--", "f.cs" }));
+              (Args{ "-C", "root", "diff", "--no-color", "--", "f.cs" }));
 }
 
 TEST(WorkTreeFileDiff, StagedAddsCached)
@@ -484,7 +484,7 @@ TEST(WorkTreeFileDiff, StagedAddsCached)
     h.fake->SetResponse("", 0);
     h.backend->WorkTreeFileDiff("root", "f.cs", 1, 0);
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "--no-optional-locks", "diff", "--cached", "--no-color",
+              (Args{ "-C", "root", "diff", "--cached", "--no-color",
                      "--", "f.cs" }));
 }
 
@@ -494,7 +494,7 @@ TEST(WorkTreeFileDiff, UntrackedUsesNoIndexAgainstDevNull)
     h.fake->SetResponse("", 0);
     h.backend->WorkTreeFileDiff("root", "new file.txt", 2, 0);
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "--no-optional-locks", "diff", "--no-color", "--no-index",
+              (Args{ "-C", "root", "diff", "--no-color", "--no-index",
                      "--", "/dev/null", "new file.txt" }));
 }
 

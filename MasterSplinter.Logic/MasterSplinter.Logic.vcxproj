@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -193,6 +193,9 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="MasterSplinter.Logic.h" />
     <ClInclude Include="Git\GitBackend.h" />
+    <ClInclude Include="Git\GitArgs.h" />
+    <ClInclude Include="Git\GitText.h" />
+    <ClInclude Include="Git\GitLogFormat.h" />
     <ClInclude Include="Platform\IProcessRunner.h" />
     <ClInclude Include="Platform\IPlatformFactory.h" />
     <ClInclude Include="Platform\Windows\WindowsProcessRunner.h" />
@@ -209,6 +212,14 @@
     <ClCompile Include="MasterSplinter.Logic.cpp" />
     <ClCompile Include="GitApi.cpp" />
     <ClCompile Include="Git\GitBackend.cpp" />
+    <ClCompile Include="Git\GitBackend.History.cpp" />
+    <ClCompile Include="Git\GitBackend.Diff.cpp" />
+    <ClCompile Include="Git\GitBackend.WorkTree.cpp" />
+    <ClCompile Include="Git\GitBackend.Refs.cpp" />
+    <ClCompile Include="Git\GitBackend.Remotes.cpp" />
+    <ClCompile Include="Git\GitBackend.Sequencer.cpp" />
+    <ClCompile Include="Git\GitBackend.Stash.cpp" />
+    <ClCompile Include="Git\GitBackend.Blame.cpp" />
     <ClCompile Include="Platform\PlatformFactory.cpp" />
     <ClCompile Include="Platform\Windows\WindowsPlatformFactory.cpp" />
     <!-- macOS Adapter (Apple frameworks): built only by the macOS toolchain, never by this

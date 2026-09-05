@@ -59,7 +59,7 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         }
 
         // First token (respecting a leading quoted exe path) is the executable; the rest is args.
-        private static (string Exe, string Args) SplitCommand(string command)
+        internal static (string Exe, string Args) SplitCommand(string command)
         {
             string c = command.Trim();
             if (c.StartsWith('"'))

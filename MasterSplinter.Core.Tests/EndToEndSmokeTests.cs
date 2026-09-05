@@ -1,0 +1,292 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using MasterSplinter.Entrypoint.Git;
+using MasterSplinter.Entrypoint.Interop;
+using MasterSplinter.Entrypoint.Models;
+
+namespace MasterSplinter.Core.Tests;
+
+/// <summary>
+/// The whole stack below the UI, for real: native DLL, git.exe, the C ABI, and the parsers, against
+/// a scratch repository built by this fixture.
+/// <para>
+/// The unit tests feed the parsers hand-written samples, which proves they parse what we *think*
+/// git emits. This proves git actually emits it — and that the P/Invoke still resolves now that
+/// NativeLogic lives in its own assembly.
+/// </para>
+/// <para>
+/// Skips itself (rather than failing) when git or the native DLL is unavailable, so a machine
+/// without them still gets a green unit run.
+/// </para>
+/// </summary>
+public sealed class ScratchRepo : IDisposable
+{
+    public string Path { get; }
+    public bool Usable { get; }
+    public string? SkipReason { get; }
+
+    public ScratchRepo()
+    {
+        Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                                      "ms-e2e-" + Guid.NewGuid().ToString("N")[..8]);
+        try
+        {
+            // Touching the ABI is what proves the native DLL resolves from this assembly.
+            if (!NativeCore.Initialize())
+            {
+                SkipReason = "native core failed to initialize";
+                return;
+            }
+            Directory.CreateDirectory(Path);
+            Build();
+            Usable = true;
+        }
+        catch (Exception ex)
+        {
+            SkipReason = ex.GetType().Name + ": " + ex.Message;
+        }
+    }
+
+    private void Git(string args)
+    {
+        var psi = new ProcessStartInfo("git", args)
+        {
+            WorkingDirectory = Path,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using Process p = Process.Start(psi) ?? throw new InvalidOperationException("git did not start");
+        p.WaitForExit();
+        // `stash pop` on a conflict exits non-zero on purpose; callers that care check the state.
+    }
+
+    /// <summary>
+    /// A repository with the shapes the parsers actually have to handle: a root commit, a rename,
+    /// a merge (two parents), a tag, a branch, and a dirty working tree with staged, unstaged and
+    /// untracked entries.
+    /// </summary>
+    private void Build()
+    {
+        Git("init -q -b main");
+        Git("config user.email test@example.com");
+        Git("config user.name \"Test User\"");
+        Git("config commit.gpgsign false");
+
+        File.WriteAllText(System.IO.Path.Combine(Path, "a.txt"), "one\ntwo\nthree\n");
+        Git("add .");
+        Git("commit -q -m \"first commit\"");
+        Git("tag v1.0");
+
+        Git("switch -q -c feature");
+        File.WriteAllText(System.IO.Path.Combine(Path, "b.txt"), "feature\n");
+        Git("add .");
+        Git("commit -q -m \"add b on feature\"");
+
+        Git("switch -q main");
+        File.WriteAllText(System.IO.Path.Combine(Path, "a.txt"), "one\nCHANGED\nthree\n");
+        Git("add .");
+        Git("commit -q -m \"change a on main\"");
+
+        Git("merge --no-ff --no-edit -q feature");   // a real two-parent merge
+
+        Git("mv a.txt renamed.txt");
+        Git("commit -q -m \"rename a to renamed\"");
+
+        // Dirty tree: one staged, one unstaged, one untracked.
+        File.WriteAllText(System.IO.Path.Combine(Path, "staged.txt"), "staged\n");
+        Git("add staged.txt");
+        File.AppendAllText(System.IO.Path.Combine(Path, "renamed.txt"), "unstaged edit\n");
+        File.WriteAllText(System.IO.Path.Combine(Path, "untracked.txt"), "untracked\n");
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            // git marks objects read-only; clear it or the delete fails.
+            foreach (string f in Directory.EnumerateFiles(Path, "*", SearchOption.AllDirectories))
+                File.SetAttributes(f, FileAttributes.Normal);
+            Directory.Delete(Path, recursive: true);
+        }
+        catch { /* a leftover temp dir is not worth failing a test run over */ }
+    }
+}
+
+[Collection("e2e")]
+public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
+{
+    private readonly ScratchRepo _repo;
+    public EndToEndSmokeTests(ScratchRepo repo) => _repo = repo;
+
+    private GitRepository Open()
+    {
+        Assert.True(_repo.Usable, "scratch repo unavailable: " + _repo.SkipReason);
+        GitRepository? git = GitRepository.Open(_repo.Path, out string? error);
+        Assert.Null(error);
+        Assert.NotNull(git);
+        return git!;
+    }
+
+    [Fact]
+    public void TheNativeCoreLoadsAndReportsAVersion()
+    {
+        Assert.True(_repo.Usable, "scratch repo unavailable: " + _repo.SkipReason);
+        Assert.False(string.IsNullOrWhiteSpace(NativeCore.Version()));
+        Assert.Equal(42, NativeCore.Add(40, 2));   // the interop round-trip itself
+    }
+
+    [Fact]
+    public void OpeningReportsTheRootAndBranch()
+    {
+        GitRepository git = Open();
+        Assert.Equal("main", git.Branch);
+        Assert.False(string.IsNullOrWhiteSpace(git.RootPath));
+    }
+
+    [Fact]
+    public void OpeningANonRepositoryFails()
+    {
+        string empty = Path.Combine(Path.GetTempPath(), "ms-not-a-repo-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(empty);
+        try
+        {
+            Assert.Null(GitRepository.Open(empty, out string? error));
+            Assert.False(string.IsNullOrWhiteSpace(error));
+        }
+        finally { Directory.Delete(empty, true); }
+    }
+
+    [Fact]
+    public void TheLogParsesIntoCommitsWithParents()
+    {
+        IReadOnlyList<CommitRow> log = Open().Log(order: 0, maxCount: 100);
+
+        Assert.NotEmpty(log);
+        Assert.All(log, c => Assert.False(string.IsNullOrWhiteSpace(c.FullHash)));
+        Assert.All(log, c => Assert.False(string.IsNullOrWhiteSpace(c.Author)));
+        Assert.Contains(log, c => c.Message == "first commit");
+
+        // The root commit has no parents; the merge has two. Both shapes must survive the round trip.
+        Assert.Contains(log, c => c.ParentHashes.Length == 0);
+        Assert.Contains(log, c => c.ParentHashes.Length == 2);
+    }
+
+    [Fact]
+    public void RefsIncludeTheBranchesAndTheTag()
+    {
+        GitRepository.RefList refs = Open().ListRefs();
+
+        Assert.Contains(refs.Branches, b => b.Name == "main");
+        Assert.Contains(refs.Branches, b => b.Name == "feature");
+        Assert.Contains(refs.Tags, t => t.Name == "v1.0");
+        Assert.Contains(refs.Branches, b => b.IsCurrent);   // %(HEAD) actually resolved
+    }
+
+    [Fact]
+    public void StatusSplitsStagedUnstagedAndUntracked()
+    {
+        GitRepository.WorkTreeStatus status = Open().Status();
+
+        Assert.Contains(status.Staged, f => f.Path == "staged.txt");
+        Assert.Contains(status.Unstaged, f => f.Path == "renamed.txt");
+        Assert.Contains(status.Untracked, f => f.Path == "untracked.txt");
+        Assert.Empty(status.Conflicted);
+    }
+
+    [Fact]
+    public void AWorkingTreeDiffParsesWithNoPhantomTrailingLine()
+    {
+        // The bug the unit tests caught: every diff used to end with a blank context row carrying a
+        // line number. Asserted here against REAL git output, not a hand-written sample.
+        var (lines, isBinary) = Open().WorkTreeDiff("renamed.txt", WorkTreeArea.Unstaged,
+                                                    WhitespaceMode.None);
+
+        Assert.False(isBinary);
+        Assert.NotEmpty(lines);
+        Assert.Contains(lines, l => l.Kind == DiffLineKind.Hunk);
+        Assert.Contains(lines, l => l.Kind == DiffLineKind.Added && l.Text == "unstaged edit");
+        Assert.False(lines[^1].Kind == DiffLineKind.Context && lines[^1].Text.Length == 0);
+    }
+
+    [Fact]
+    public void ACommitDiffParses()
+    {
+        GitRepository git = Open();
+        CommitRow commit = git.Log(0, 100).First(c => c.Message == "change a on main");
+
+        IReadOnlyList<ChangedFile> files = git.ChangedFiles(commit.FullHash);
+        Assert.Contains(files, f => f.Path == "a.txt");
+
+        var (lines, _) = git.FileDiff(commit.FullHash, "a.txt", WhitespaceMode.None);
+        Assert.Contains(lines, l => l.Kind == DiffLineKind.Added && l.Text == "CHANGED");
+        Assert.Contains(lines, l => l.Kind == DiffLineKind.Removed && l.Text == "two");
+    }
+
+    [Fact]
+    public void ARenameIsReportedAgainstTheNewPath()
+    {
+        GitRepository git = Open();
+        CommitRow commit = git.Log(0, 100).First(c => c.Message == "rename a to renamed");
+
+        IReadOnlyList<ChangedFile> files = git.ChangedFiles(commit.FullHash);
+
+        Assert.Contains(files, f => f.Status == FileChangeStatus.Renamed && f.Path == "renamed.txt");
+    }
+
+    [Fact]
+    public void ShortStatCountsTheCommit()
+    {
+        GitRepository git = Open();
+        CommitRow commit = git.Log(0, 100).First(c => c.Message == "change a on main");
+
+        DiffStat stat = git.CommitStat(commit.FullHash);
+
+        Assert.False(stat.IsEmpty);
+        Assert.Equal(1, stat.Files);
+    }
+
+    [Fact]
+    public void BlameAttributesLinesToRealCommits()
+    {
+        IReadOnlyList<BlameLine> lines = Open().Blame("HEAD", "renamed.txt", ignoreWhitespace: false,
+                                             BlameMoveDetection.None, out string? error);
+
+        Assert.Null(error);
+        Assert.NotEmpty(lines);
+        Assert.All(lines, l => Assert.False(string.IsNullOrWhiteSpace(l.Sha)));
+        // The per-sha header cache: every line must carry an author, not just the group starts.
+        Assert.All(lines, l => Assert.False(string.IsNullOrWhiteSpace(l.Author)));
+    }
+
+    [Fact]
+    public void SearchFindsACommitByMessage()
+    {
+        IReadOnlyList<CommitRow> hits = Open().SearchLog(
+            SearchMode.Message, "first commit", pathFilter: "", order: 0, maxCount: 50,
+            matchCase: false, useRegex: false, allBranches: true);
+
+        Assert.Contains(hits, c => c.Message == "first commit");
+    }
+
+    [Fact]
+    public void TheReflogIsReadable()
+    {
+        IReadOnlyList<ReflogEntry> entries = Open().Reflog("HEAD", 50);
+
+        Assert.NotEmpty(entries);
+        Assert.All(entries, e => Assert.False(string.IsNullOrWhiteSpace(e.Selector)));
+    }
+
+    [Fact]
+    public void RepositoryStateIsCleanOnAHealthyRepo()
+    {
+        RepositoryState state = Open().State();
+
+        Assert.Equal(RepoOperation.None, state.Op);
+        Assert.False(state.IsActive);
+    }
+}

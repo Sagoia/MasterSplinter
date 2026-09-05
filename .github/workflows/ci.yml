@@ -79,6 +79,23 @@ jobs:
           -p:GenerateAppxPackageOnBuild=false
           -p:PublishProfile=
 
+      # Runs the unit tests AND the end-to-end smoke tests, which drive the real native DLL and
+      # real git against a scratch repo. Needs the native core built first, hence the ordering.
+      - name: Build native core
+        run: >
+          msbuild MasterSplinter.Logic\MasterSplinter.Logic.vcxproj
+          -t:Build
+          -p:Configuration=${{ env.Configuration }}
+          -p:Platform=${{ matrix.platform }}
+
+      - name: Run managed unit tests
+        run: >
+          dotnet test MasterSplinter.Core.Tests\MasterSplinter.Core.Tests.csproj
+          -c ${{ env.Configuration }}
+          -p:Platform=${{ matrix.platform }}
+          --logger "trx;LogFileName=MasterSplinter.Core.Tests.${{ matrix.platform }}.trx"
+          --results-directory ${{ env.TestResultsDirectory }}/${{ matrix.platform }}
+
       - name: Build unit tests
         run: >
           msbuild MasterSplinter.Logic.Tests\MasterSplinter.Logic.Tests.vcxproj

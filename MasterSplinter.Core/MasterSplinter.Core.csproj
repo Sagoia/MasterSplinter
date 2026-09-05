@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The portable half of the app: models, the git output parsers, the P/Invoke surface, and the
+    UI-agnostic helpers. Deliberately plain net8.0 with NO WinUI reference — that is what makes it
+    unit-testable without the Windows App SDK runtime, and it keeps the "parsing is portable logic"
+    boundary structural instead of a matter of discipline.
+
+    Namespaces stay MasterSplinter.Entrypoint.* on purpose: these types moved out of that project
+    unchanged, and renaming them would have churned every `using` in the app for no behavioural
+    gain. Assembly name and namespace differ as a result; that is the intended trade.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Platforms>x64;ARM64</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+  </ItemGroup>
+
+</Project>

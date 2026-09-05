@@ -45,10 +45,13 @@ namespace MasterSplinter.Entrypoint
         {
             // Bring up the cross-platform C++ core before any logic runs; tear it down on exit.
             // (Real lifecycle lives here, not in the DLL's DllMain — see MasterSplinter.Logic.)
-            Interop.NativeLogic.Initialize();
+            // Core is platform-free, so it cannot reach ApplicationData itself — the host
+            // supplies the local-data path once, here.
+            Git.AppStores.UseDirectory(Windows.Storage.ApplicationData.Current.LocalFolder.Path);
+            Interop.NativeCore.Initialize();
 
             _window = new MainWindow();
-            _window.Closed += (_, _) => Interop.NativeLogic.Shutdown();
+            _window.Closed += (_, _) => Interop.NativeCore.Shutdown();
             _window.Activate();
         }
     }
