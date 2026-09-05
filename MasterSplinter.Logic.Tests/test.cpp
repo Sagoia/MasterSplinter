@@ -9,6 +9,8 @@
 
 #include "Git/GitBackend.h"
 #include "FakeProcessRunner.h"
+#include "PackedRead.h"
+#include "Parse/DiffParser.h"
 
 // Unit tests for the portable git command builder (the Bridge abstraction). Every test injects a
 // FakeProcessRunner into GitBackend, so nothing here spawns git.exe or touches a repository — the
@@ -553,11 +555,15 @@ TEST(WorkTreeFileDiff, WhitespaceFlags)
 
 TEST(WorkTreeFileDiff, UntrackedReturnsOutputOnExitCode1)
 {
-    // diff --no-index exits 1 when the files differ — that is the success case here.
+    // diff --no-index exits 1 when the files differ -- that is the success case here, which is
+    // why this read uses RunRaw. Asserted through the packed payload now that the diff is parsed
+    // natively: a non-empty record set is what proves the output was not discarded as a failure.
     auto h = MakeHarness();
-    h.fake->SetResponse("diff --git a/dev/null b/n.txt\n+new line\n", 1);
-    EXPECT_EQ(h.backend->WorkTreeFileDiff("root", "n.txt", 2, 0),
-              "diff --git a/dev/null b/n.txt\n+new line\n");
+    h.fake->SetResponse("diff --git a/dev/null b/n.txt\n@@ -0,0 +1 @@\n+new line\n", 1);
+
+    const mstest::PackedRead p(h.backend->WorkTreeFileDiff("root", "n.txt", 2, 0));
+    ASSERT_EQ(p.Count(), 2u);
+    EXPECT_EQ(p.RecStr(1, ms::parse::kDiffOffText), "new line");
 }
 
 TEST(WorkTreeFileDiff, EmptyPathReturnsEmptyWithoutCallingGit)

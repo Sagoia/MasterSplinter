@@ -62,7 +62,8 @@ namespace MasterSplinter.Entrypoint.Interop
         private static extern IntPtr MsGitFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
-                                                   int wsMode);
+                                                   int wsMode,
+                                                   out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFileAtCommit", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileAtCommit([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -84,7 +85,8 @@ namespace MasterSplinter.Entrypoint.Interop
                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string b,
                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
-                                                        int wsMode);
+                                                        int wsMode,
+                                                        out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitStatus", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitStatus([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
@@ -93,7 +95,8 @@ namespace MasterSplinter.Entrypoint.Interop
         private static extern IntPtr MsGitWorkTreeFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                            [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
                                                            int area,
-                                                           int wsMode);
+                                                           int wsMode,
+                                                           out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFileBytesAtCommit", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileBytesAtCommit([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -340,13 +343,30 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitRefDetails(string root) => TakeString(MsGitRefDetails(root));
         public static string GitCommitFiles(string root, string sha) => TakeString(MsGitCommitFiles(root, sha));
         public static string GitCommitShortStat(string root, string sha) => TakeString(MsGitCommitShortStat(root, sha));
-        public static string GitFileDiff(string root, string sha, string path, int wsMode) => TakeString(MsGitFileDiff(root, sha, path, wsMode));
+        /// <summary>Parsed unified diff for one file in a commit, as a packed buffer.</summary>
+        public static PackedBuffer GitFileDiff(string root, string sha, string path, int wsMode)
+        {
+            IntPtr ptr = MsGitFileDiff(root, sha, path, wsMode, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         public static string GitFileAtCommit(string root, string sha, string path) => TakeString(MsGitFileAtCommit(root, sha, path));
         public static string GitRangeFiles(string root, string a, string b) => TakeString(MsGitRangeFiles(root, a, b));
         public static string GitRangeShortStat(string root, string a, string b) => TakeString(MsGitRangeShortStat(root, a, b));
-        public static string GitRangeFileDiff(string root, string a, string b, string path, int wsMode) => TakeString(MsGitRangeFileDiff(root, a, b, path, wsMode));
+        /// <summary>Parsed unified diff for one file between two commits, as a packed buffer.</summary>
+        public static PackedBuffer GitRangeFileDiff(string root, string a, string b, string path, int wsMode)
+        {
+            IntPtr ptr = MsGitRangeFileDiff(root, a, b, path, wsMode, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         public static string GitStatus(string root) => TakeString(MsGitStatus(root));
-        public static string GitWorkTreeFileDiff(string root, string path, int area, int wsMode) => TakeString(MsGitWorkTreeFileDiff(root, path, area, wsMode));
+        /// <summary>Parsed unified diff for one working-tree file, as a packed buffer.
+        /// <paramref name="area"/> follows the ABI numbering (0 = unstaged), NOT the enum order --
+        /// always go through GitRepository.AreaFlag.</summary>
+        public static PackedBuffer GitWorkTreeFileDiff(string root, string path, int area, int wsMode)
+        {
+            IntPtr ptr = MsGitWorkTreeFileDiff(root, path, area, wsMode, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         public static string GitStagePaths(string root, string paths) => TakeString(MsGitStagePaths(root, paths));
         public static string GitStageAll(string root) => TakeString(MsGitStageAll(root));
         public static string GitUnstagePaths(string root, string paths) => TakeString(MsGitUnstagePaths(root, paths));

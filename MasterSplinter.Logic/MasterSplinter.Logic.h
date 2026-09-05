@@ -68,9 +68,14 @@ extern "C" {
 	// One-line "--shortstat" summary for a commit ("N files changed, X insertions(+), Y deletions(-)").
 	MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha);
 
-	// Unified diff text for one file in one commit (no commit header).
+	// PACKED (Kind::Diff). Unified diff for one file in one commit (no commit header), already
+	// parsed into line records -- see Packed/PackedFormat.h for the buffer layout and
+	// Parse/DiffParser.h for the record fields. *outLen holds the byte count; the payload MAY
+	// contain NULs, so copy exactly that many bytes rather than using strlen. Header flag bit 0
+	// means git reported the file as binary. nullptr only if the allocation itself failed.
 	// wsMode: 0 = honor whitespace, 1 = --ignore-space-change, 2 = --ignore-all-space.
-	MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path, int wsMode);
+	MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path,
+	                                            int wsMode, int* outLen);
 
 	// Full file content as of that commit (git show <sha>:<path>); empty if absent.
 	MASTERSPLINTERLOGIC_API char* MsGitFileAtCommit(const char* root, const char* sha, const char* path);
@@ -84,9 +89,9 @@ extern "C" {
 	// One-line "--shortstat" summary for the diff between a and b.
 	MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b);
 
-	// Unified diff text for one file between a and b. wsMode as in MsGitFileDiff.
+	// PACKED (Kind::Diff), as MsGitFileDiff, for one file between a and b.
 	MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
-	                                                 const char* path, int wsMode);
+	                                                 const char* path, int wsMode, int* outLen);
 
 	// ---- Working tree status (Phase 3) ---------------------------------------------------------
 
@@ -97,11 +102,13 @@ extern "C" {
 	// Untracked files appear as "?? <path>" (--untracked-files=all). Empty string on error.
 	MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root);
 
-	// Unified diff for one working-tree file. area: 0 = unstaged (worktree vs index),
-	// 1 = staged (index vs HEAD, --cached), 2 = untracked (--no-index vs /dev/null, i.e. the
-	// whole file as additions). wsMode as in MsGitFileDiff.
+	// PACKED (Kind::Diff), as MsGitFileDiff, for one working-tree file.
+	// area: 0 = unstaged (worktree vs index), 1 = staged (index vs HEAD, --cached),
+	// 2 = untracked (--no-index vs /dev/null, i.e. the whole file as additions).
+	// NOTE the numbering: it does NOT match the host enum's declaration order. See the trap in
+	// docs/abi.md -- casting the C# WorkTreeArea enum to int swaps staged and unstaged.
 	MASTERSPLINTERLOGIC_API char* MsGitWorkTreeFileDiff(const char* root, const char* path,
-	                                                    int area, int wsMode);
+	                                                    int area, int wsMode, int* outLen);
 
 	// Raw bytes of a file as of a commit/ref (git show <sha>:<path>), for binary/image previews.
 	// Unlike the char*-as-string returns, the payload MAY contain NUL bytes; *outLen holds the

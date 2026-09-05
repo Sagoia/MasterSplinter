@@ -97,26 +97,16 @@ namespace MasterSplinter.Entrypoint.Git
 
         // ---- Diff for one file (single commit or a..b range) -----------------------------------
 
-        private static readonly Regex HunkRe =
-            new(@"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", RegexOptions.Compiled);
-
-        // A COMBINED diff (git's `--cc` output, which is what an unmerged path produces) has one
-        // extra '@' and one extra "-<start>,<len>" per parent: "@@@ -1,3 -1,3 +1,7 @@@". The last
-        // range is still the result side. Matching it is what stops a conflicted file's diff pane
-        // from rendering empty.
-        private static readonly Regex CombinedHunkRe =
-            new(@"^(@{3,}) (?:-(\d+)(?:,\d+)? )+\+(\d+)(?:,\d+)? @{3,}", RegexOptions.Compiled);
-
         public (List<DiffLine> Lines, bool IsBinary) FileDiff(string sha, string path, WhitespaceMode ws)
-            => ParseUnifiedDiff(NativeLogic.GitFileDiff(RootPath, sha, path, WsFlag(ws)));
+            => ReadDiff(NativeLogic.GitFileDiff(RootPath, sha, path, WsFlag(ws)));
 
         public (List<DiffLine> Lines, bool IsBinary) RangeDiff(string a, string b, string path, WhitespaceMode ws)
-            => ParseUnifiedDiff(NativeLogic.GitRangeFileDiff(RootPath, a, b, path, WsFlag(ws)));
+            => ReadDiff(NativeLogic.GitRangeFileDiff(RootPath, a, b, path, WsFlag(ws)));
 
         /// <summary>Diff for one working-tree file (STATUS-005). The area picks worktree-vs-index,
         /// index-vs-HEAD (staged), or an all-added synthesized diff for untracked files.</summary>
         public (List<DiffLine> Lines, bool IsBinary) WorkTreeDiff(string path, WorkTreeArea area, WhitespaceMode ws)
-            => ParseUnifiedDiff(NativeLogic.GitWorkTreeFileDiff(RootPath, path, AreaFlag(area), WsFlag(ws)));
+            => ReadDiff(NativeLogic.GitWorkTreeFileDiff(RootPath, path, AreaFlag(area), WsFlag(ws)));
 
         // The native ABI's area contract (0 = unstaged, 1 = staged, 2 = untracked) is independent
         // of the C# enum's declaration order — map explicitly, like WsFlag.
@@ -134,144 +124,44 @@ namespace MasterSplinter.Entrypoint.Git
             _ => 0,
         };
 
-        internal static (List<DiffLine> Lines, bool IsBinary) ParseUnifiedDiff(string raw)
-        {
-            // A binary file's patch has no hunks, just a "Binary files ... differ" / binary-patch marker.
-            bool isBinary = raw.Contains("Binary files ", StringComparison.Ordinal)
-                         || raw.Contains("GIT binary patch", StringComparison.Ordinal);
+        // ---- Reading a packed diff -------------------------------------------------------------
+        //
+        // Parsing itself lives in the native core now (Parse/DiffParser.{h,cpp}), so what is left
+        // here is unpacking. The layout below mirrors DiffParser.h; the two tables ARE the
+        // contract, which is why both sides spell the offsets out rather than sharing a struct.
 
-            var lines = new List<DiffLine>();
-            int oldNo = 0, newNo = 0;
-            bool inHunk = false;
-            // >0 once a combined hunk header has been seen: the number of leading marker columns
-            // (one per parent) each body line carries. 0 means an ordinary two-way diff.
-            int markerColumns = 0;
-
-            foreach (string line in raw.Split('\n'))
-            {
-                string l = line.TrimEnd('\r');
-
-                if (l.StartsWith("@@", StringComparison.Ordinal))
-                {
-                    Match combined = CombinedHunkRe.Match(l);
-                    if (combined.Success)
-                    {
-                        // "@@@" -> 2 parents -> 2 marker columns, "@@@@" -> 3, and so on.
-                        markerColumns = combined.Groups[1].Value.Length - 1;
-                        // Captures[0] is the first parent's range; either side is as good a base as
-                        // the other for the left gutter, and git prints them in parent order.
-                        oldNo = int.Parse(combined.Groups[2].Captures[0].Value, CultureInfo.InvariantCulture);
-                        newNo = int.Parse(combined.Groups[3].Value, CultureInfo.InvariantCulture);
-                    }
-                    else
-                    {
-                        markerColumns = 0;
-                        Match m = HunkRe.Match(l);
-                        if (m.Success)
-                        {
-                            oldNo = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
-                            newNo = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
-                        }
-                    }
-                    inHunk = true;
-                    lines.Add(new DiffLine { Kind = DiffLineKind.Hunk, Text = l });
-                    continue;
-                }
-
-                if (!inHunk)
-                    continue; // skip the "diff --git / index / --- / +++" file header block
-
-                if (l.StartsWith("\\", StringComparison.Ordinal))
-                    continue; // "\ No newline at end of file"
-
-                // git always writes a marker column, so a BLANK context line arrives as " " (and
-                // becomes "" only after the marker is stripped). A zero-length line here is
-                // therefore never content: it is the empty tail left behind when the diff's
-                // final newline is split. Emitting it added a phantom blank row, carrying a
-                // line number, to the end of every diff.
-                if (l.Length == 0)
-                    continue;
-
-                if (markerColumns > 0)
-                {
-                    lines.Add(ParseCombinedLine(l, markerColumns, ref oldNo, ref newNo));
-                    continue;
-                }
-
-                if (l.StartsWith("+", StringComparison.Ordinal))
-                {
-                    lines.Add(new DiffLine { Kind = DiffLineKind.Added, NewNo = newNo.ToString(), Text = l[1..] });
-                    newNo++;
-                }
-                else if (l.StartsWith("-", StringComparison.Ordinal))
-                {
-                    lines.Add(new DiffLine { Kind = DiffLineKind.Removed, OldNo = oldNo.ToString(), Text = l[1..] });
-                    oldNo++;
-                }
-                else
-                {
-                    // context line (leading space) or a blank line within the hunk
-                    string text = l.StartsWith(" ", StringComparison.Ordinal) ? l[1..] : l;
-                    lines.Add(new DiffLine
-                    {
-                        Kind = DiffLineKind.Context,
-                        OldNo = oldNo.ToString(),
-                        NewNo = newNo.ToString(),
-                        Text = text,
-                    });
-                    oldNo++;
-                    newNo++;
-                }
-            }
-            return (lines, isBinary);
-        }
+        private const int DiffOffKind = 0;
+        private const int DiffOffOldNo = 4;
+        private const int DiffOffNewNo = 8;
+        private const int DiffOffText = 12;
+        private const ushort DiffFlagBinary = 0x0001;
 
         /// <summary>
-        /// One body line of a combined diff. The first <paramref name="markers"/> characters are
-        /// one marker per parent — '-' where the line is absent from that parent's side, '+' where
-        /// it is new relative to it, ' ' where it is unchanged — and the text starts after them.
-        /// A line removed from any parent is not in the merged result, so it only advances the old
-        /// counter; everything else lands in the result and advances the new one.
+        /// Materialises a packed diff into display lines.
+        /// <para>
+        /// Line numbers arrive as integers with -1 meaning "this side has no number", so the
+        /// gutters cost no string allocation until this point. A malformed buffer reads as zero
+        /// records, which renders an empty diff pane -- the same thing unparseable patch text
+        /// always did.
+        /// </para>
         /// </summary>
-        private static DiffLine ParseCombinedLine(string line, int markers, ref int oldNo, ref int newNo)
+        internal static (List<DiffLine> Lines, bool IsBinary) ReadDiff(PackedBuffer buf)
         {
-            string prefix = line.Length >= markers ? line[..markers] : line.PadRight(markers);
-            string text = line.Length > markers ? line[markers..] : "";
-
-            if (prefix.Contains('-'))
+            int count = buf.RecordCount;
+            var lines = new List<DiffLine>(count);
+            for (int i = 0; i < count; i++)
             {
-                var removed = new DiffLine
+                int oldNo = buf.I32(i, DiffOffOldNo);
+                int newNo = buf.I32(i, DiffOffNewNo);
+                lines.Add(new DiffLine
                 {
-                    Kind = DiffLineKind.Removed,
-                    OldNo = oldNo.ToString(CultureInfo.InvariantCulture),
-                    Text = text,
-                };
-                oldNo++;
-                return removed;
+                    Kind = (DiffLineKind)buf.U8(i, DiffOffKind),
+                    OldNo = oldNo < 0 ? "" : oldNo.ToString(CultureInfo.InvariantCulture),
+                    NewNo = newNo < 0 ? "" : newNo.ToString(CultureInfo.InvariantCulture),
+                    Text = buf.Str(i, DiffOffText),
+                });
             }
-
-            if (prefix.Contains('+'))
-            {
-                var added = new DiffLine
-                {
-                    Kind = DiffLineKind.Added,
-                    NewNo = newNo.ToString(CultureInfo.InvariantCulture),
-                    Text = text,
-                };
-                newNo++;
-                return added;
-            }
-
-            var context = new DiffLine
-            {
-                Kind = DiffLineKind.Context,
-                OldNo = oldNo.ToString(CultureInfo.InvariantCulture),
-                NewNo = newNo.ToString(CultureInfo.InvariantCulture),
-                Text = text,
-            };
-            oldNo++;
-            newNo++;
-            return context;
+            return (lines, (buf.Flags & DiffFlagBinary) != 0);
         }
 
         // ---- File content at a commit ----------------------------------------------------------

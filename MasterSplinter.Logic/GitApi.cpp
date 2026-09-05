@@ -10,6 +10,7 @@
 #include "MasterSplinter.Logic.h"
 
 #include "Git/GitBackend.h"
+#include "Packed/PackedWriter.h"
 #include "Platform/IPlatformFactory.h"
 
 #include <atomic>
@@ -159,6 +160,40 @@ namespace
     {
         return Call(kInternalError, sizeof(kInternalError) - 1, method, args...);
     }
+
+    // A packed call: the payload is a length-prefixed binary buffer, so it needs the explicit
+    // *outLen that MsGitFileBytesAtCommit pioneered -- strlen would stop at the first heap NUL.
+    // Status travels INSIDE the buffer (see PackedFormat.h), which is why there is no OK/ERR
+    // framing here; an exception still becomes a packed error buffer rather than a nullptr, so
+    // the host always has somewhere to read a message from.
+    template <typename Method, typename... Args>
+    char* CallPacked(int* outLen, ms::packed::Kind kind, Method method, Args... args) noexcept
+    {
+        if (outLen)
+            *outLen = 0;
+
+        std::string payload;
+        try
+        {
+            payload = (Backend().*method)(Adapt(args)...);
+        }
+        catch (...)
+        {
+            try
+            {
+                payload = ms::packed::PackedWriter::Error(kind, "The operation failed unexpectedly.");
+            }
+            catch (...)
+            {
+                return nullptr;
+            }
+        }
+
+        char* p = DupBytes(payload.data(), payload.size());
+        if (p && outLen)
+            *outLen = static_cast<int>(payload.size());
+        return p;
+    }
 }
 
 // Backend lifecycle hooks, called from MsLogicInitialize / MsLogicShutdown (MasterSplinter.Logic.cpp).
@@ -223,9 +258,10 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, 
     return CallRead(&ms::GitBackend::CommitShortStat, root, sha);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path, int wsMode)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path,
+                                                       int wsMode, int* outLen)
 {
-    return CallRead(&ms::GitBackend::FileDiff, root, sha, path, wsMode);
+    return CallPacked(outLen, ms::packed::Kind::Diff, &ms::GitBackend::FileDiff, root, sha, path, wsMode);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileAtCommit(const char* root, const char* sha, const char* path)
@@ -246,9 +282,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, c
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
-                                                            const char* path, int wsMode)
+                                                            const char* path, int wsMode, int* outLen)
 {
-    return CallRead(&ms::GitBackend::RangeFileDiff, root, a, b, path, wsMode);
+    return CallPacked(outLen, ms::packed::Kind::Diff, &ms::GitBackend::RangeFileDiff, root, a, b, path, wsMode);
 }
 
 // ---- Working tree (Phase 3) ------------------------------------------------------------------
@@ -259,9 +295,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root)
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitWorkTreeFileDiff(const char* root, const char* path,
-                                                               int area, int wsMode)
+                                                               int area, int wsMode, int* outLen)
 {
-    return CallRead(&ms::GitBackend::WorkTreeFileDiff, root, path, area, wsMode);
+    return CallPacked(outLen, ms::packed::Kind::Diff, &ms::GitBackend::WorkTreeFileDiff, root, path, area, wsMode);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileBytesAtCommit(const char* root, const char* sha,

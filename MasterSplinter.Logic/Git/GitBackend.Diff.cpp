@@ -9,6 +9,8 @@
 #include "GitBackend.h"
 #include "GitText.h"
 
+#include "../Parse/DiffParser.h"
+
 namespace ms
 {
     std::string GitBackend::CommitFiles(const std::string& root, const std::string& sha) const
@@ -40,12 +42,15 @@ namespace ms
     {
         if (root.empty() || sha.empty() || path.empty())
             return std::string();
-        return RunRaw(root, GitArgs{ "diff-tree", "-p", "-M", "--first-parent", "--root",
-                                     "--no-commit-id", "--no-color" }
-            .FirstParentMerges()
-            .Whitespace(wsMode)
-            .Add(sha)
-            .Path(path));
+        // Parsed here rather than by the host: the line text then crosses the ABI
+        // length-prefixed instead of delimited, and a macOS UI gets the parser for free.
+        return parse::ParseUnifiedDiff(
+            RunRaw(root, GitArgs{ "diff-tree", "-p", "-M", "--first-parent", "--root",
+                                  "--no-commit-id", "--no-color" }
+                .FirstParentMerges()
+                .Whitespace(wsMode)
+                .Add(sha)
+                .Path(path)));
     }
 
     std::string GitBackend::FileAtCommit(const std::string& root, const std::string& sha,
@@ -81,11 +86,12 @@ namespace ms
     {
         if (root.empty() || a.empty() || b.empty() || path.empty())
             return std::string();
-        return RunRaw(root, GitArgs{ "diff", "-M", "--no-color" }
-            .Whitespace(wsMode)
-            .Add(a)
-            .Add(b)
-            .Path(path));
+        return parse::ParseUnifiedDiff(
+            RunRaw(root, GitArgs{ "diff", "-M", "--no-color" }
+                .Whitespace(wsMode)
+                .Add(a)
+                .Add(b)
+                .Path(path)));
     }
 
     std::optional<std::string> GitBackend::FileBytesAt(const std::string& root, const std::string& sha,

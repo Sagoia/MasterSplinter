@@ -9,6 +9,8 @@
 #include "GitBackend.h"
 #include "GitText.h"
 
+#include "../Parse/DiffParser.h"
+
 namespace ms
 {
     // ---- Working tree (Phase 3) ----------------------------------------------------------------
@@ -64,7 +66,7 @@ namespace ms
         {
             args.Separator();
         }
-        return RunRaw(root, args.Add(path));
+        return parse::ParseUnifiedDiff(RunRaw(root, args.Add(path)));
     }
 
     // ---- Write operations (Phase 4, COMMIT-001..007) -------------------------------------------
