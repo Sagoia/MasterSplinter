@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
@@ -45,6 +45,11 @@
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Sizers" Version="8.2.251219" />
     <!-- DIFF-003: syntax highlighting (ColorCode tokenizer + WinUI RichTextBlock formatter). -->
     <PackageReference Include="ColorCode.WinUI" Version="2.0.15" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The portable half of the app (models, parsers, P/Invoke). Plain net8.0, no WinUI — see
+         that project's header for why the split exists. -->
+    <ProjectReference Include="..\MasterSplinter.Core\MasterSplinter.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- Native C++ DLL: build it first; it is NOT a managed assembly so don't reference it as one
@@ -114,6 +119,15 @@
          reflection (view models, converters, template selectors, CommunityToolkit controls), so a
          trimmed build launches to a blank window / "nothing shows". Keep trimming OFF everywhere. -->
     <PublishTrimmed>false</PublishTrimmed>
+
+    <!-- MVVMTK0045: [ObservableProperty] on a FIELD generates code that is not AOT-compatible in
+         WinRT scenarios; the toolkit wants a partial property instead. Suppressed deliberately:
+         (a) AOT requires trimming, which the comment above rules out for WinUI 3 regardless, so the
+             scenario the warning guards against cannot arise here; and
+         (b) partial properties are a C# 13 feature, unavailable on this net8.0 target — there is no
+             version of this code that both targets net8.0 and satisfies the analyzer.
+         Revisit if this ever moves to net9.0+, where the partial-property form becomes possible. -->
+    <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
   </PropertyGroup>
 
   <!-- Memory profile: a desktop app wants Workstation GC (small working set, low latency).

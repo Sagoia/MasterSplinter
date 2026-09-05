@@ -42,8 +42,8 @@ namespace MasterSplinter.Entrypoint
             // ---- Confirm the native C++ core loaded (P/Invoke) ------------------------------
             try
             {
-                CoreInfo.Text = $"· {Interop.NativeLogic.Version()}";
-                System.Diagnostics.Debug.WriteLine($"[interop] MsLogicAdd(40,2) = {Interop.NativeLogic.Add(40, 2)}");
+                CoreInfo.Text = $"· {Interop.NativeCore.Version()}";
+                System.Diagnostics.Debug.WriteLine($"[interop] MsLogicAdd(40,2) = {Interop.NativeCore.Add(40, 2)}");
             }
             catch (Exception ex)
             {
@@ -154,7 +154,7 @@ namespace MasterSplinter.Entrypoint
 
         private async void Options_Click(object sender, RoutedEventArgs e)
         {
-            var settings = Git.SettingsStore.Load();
+            var settings = await Task.Run(Git.AppStores.Settings.Load);
 
             var editorBox = new TextBox
             {
@@ -213,7 +213,7 @@ namespace MasterSplinter.Entrypoint
             {
                 settings.EditorCommand = editorBox.Text?.Trim() ?? "";
                 settings.MergeTool = mergeToolBox.Text?.Trim() ?? "";
-                Git.SettingsStore.Save(settings);
+                await Task.Run(() => Git.AppStores.Settings.Save(settings));
             }
         }
 

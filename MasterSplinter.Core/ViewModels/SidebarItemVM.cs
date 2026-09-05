@@ -1,3 +1,4 @@
+using CommunityToolkit.Mvvm.ComponentModel;
 using MasterSplinter.Entrypoint.Infrastructure;
 
 namespace MasterSplinter.Entrypoint.ViewModels
@@ -28,17 +29,17 @@ namespace MasterSplinter.Entrypoint.ViewModels
         public bool IsExpandable => Kind == SidebarKind.SectionHeader || Kind == SidebarKind.Remote;
 
         private bool _isExpanded = true;
-        public bool IsExpanded { get => _isExpanded; set => Set(ref _isExpanded, value); }
+        public bool IsExpanded { get => _isExpanded; set => SetProperty(ref _isExpanded, value); }
 
         private bool _isSelected;
         public bool IsSelected
         {
             get => _isSelected;
-            set { if (Set(ref _isSelected, value)) Raise(nameof(IsEmphasized)); }
+            set { if (SetProperty(ref _isSelected, value)) OnPropertyChanged(nameof(IsEmphasized)); }
         }
 
         private bool _isVisible = true;
-        public bool IsVisible { get => _isVisible; set => Set(ref _isVisible, value); }
+        public bool IsVisible { get => _isVisible; set => SetProperty(ref _isVisible, value); }
 
         /// <summary>Whether this is the branch HEAD points at. Deliberately separate from
         /// <see cref="IsSelected"/>: selection is where the user is looking, currency is where
@@ -48,7 +49,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
         public bool IsCurrent
         {
             get => _isCurrent;
-            set { if (Set(ref _isCurrent, value)) Raise(nameof(IsEmphasized)); }
+            set { if (SetProperty(ref _isCurrent, value)) OnPropertyChanged(nameof(IsEmphasized)); }
         }
 
         public bool IsEmphasized => IsSelected || IsCurrent;

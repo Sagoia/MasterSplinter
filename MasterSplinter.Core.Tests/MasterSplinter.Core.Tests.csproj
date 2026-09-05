@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Platforms>x64;ARM64</Platforms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <!-- The integration smoke test drives the REAL native core, so the DLL has to sit next to the
+       test host. Unit tests never load it; if it is missing those still run and the integration
+       tests skip themselves rather than failing. -->
+  <ItemGroup>
+    <None Include="..\MasterSplinter.Logic\$(Platform)\$(Configuration)\MasterSplinterLogic.dll"
+          Condition="Exists('..\MasterSplinter.Logic\$(Platform)\$(Configuration)\MasterSplinterLogic.dll')">
+      <Link>MasterSplinterLogic.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MasterSplinter.Core\MasterSplinter.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

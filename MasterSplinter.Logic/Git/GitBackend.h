@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "../Platform/IProcessRunner.h"
+#include "GitArgs.h"
 
 namespace ms
 {
@@ -242,12 +243,40 @@ namespace ms
         std::string RunGitC(const std::string& root, std::vector<std::string> args,
                             RunOptions options, int& code) const;
 
+        // ---- Terminal verbs -------------------------------------------------------------------
+        // Run a built command and apply one of the two return conventions documented in
+        // docs/abi.md, so no method has to spell out the `int code;` + trim + frame dance itself.
+
+        // Raw: the merged output, exit code IGNORED. For the reads where a non-zero exit is a
+        // normal outcome (`diff --no-index` exits 1 precisely when the files differ) or where the
+        // host's field-count floor already discards git's error text.
+        std::string RunRaw(const std::string& root, GitArgs args) const;
+
+        // Path list: like RunRaw, but for commands that emit PATHS (--name-status and friends).
+        // Appends -z and translates git's NUL separators to RS, so the two can never drift
+        // apart. Without -z a path containing a quote, backslash or control character arrives
+        // C-quoted -- core.quotePath=false does NOT prevent that -- and the host would then
+        // address a file that does not exist. Records are not fixed width: a status token is
+        // followed by one path, or by two (old then new) for R/C.
+        std::string RunPathList(const std::string& root, GitArgs args) const;
+        // Read: the merged output, or "" when git failed. The default for a read.
+        std::string RunRead(const std::string& root, GitArgs args) const;
+
+        // Read one value: output with trailing newlines trimmed, or "" when git failed. `ok`
+        // receives whether git succeeded, since "" is also a legitimate result for some probes.
+        std::string RunValue(const std::string& root, GitArgs args, bool& ok) const;
+
+        // Write: "OK", or "ERR" US <git's output, or `fallback` when git printed nothing>.
+        std::string RunWrite(const std::string& root, GitArgs args, const char* fallback) const;
+        std::string RunWrite(const std::string& root, GitArgs args,
+                             const std::optional<std::string>& input, const char* fallback) const;
+
         // Shared shape of fetch/pull/push: --progress + the no-terminal-prompt environment.
-        std::string RunNetworkCommand(const std::string& root, std::vector<std::string> args,
+        std::string RunNetworkCommand(const std::string& root, GitArgs args,
                                       const ProgressSink& progress, const char* fallback) const;
 
         // Shared shape of the Phase 7 commands: the non-interactive environment + a live sink.
-        std::string RunSequencerCommand(const std::string& root, std::vector<std::string> args,
+        std::string RunSequencerCommand(const std::string& root, GitArgs args,
                                         const ProgressSink& progress, const char* fallback) const;
 
         // Shared shape of stash apply/pop/drop: validate the selector, then one plain spawn.

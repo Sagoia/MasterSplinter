@@ -37,6 +37,9 @@ namespace MasterSplinter.Entrypoint.Controls
             Func<IProgress<string>, CancellationToken, Task<string?>> operation)
         {
             var log = new ProgressLog();
+            // Clear any flag left set by a previous dialog whose queued scroll never ran (app
+            // shutdown, a drained queue); otherwise this dialog would never auto-scroll.
+            _scrollQueued = false;
             // Seeded with the command being run, so the log reads like a terminal session and the
             // user can see exactly what was invoked on their behalf.
             log.Append("$ " + commandLabel + "\n");
@@ -253,12 +256,28 @@ namespace MasterSplinter.Entrypoint.Controls
                 : null;
         }
 
+        /// <summary>Tracks whether a scroll-to-bottom is already queued, so a burst of chunks
+        /// schedules one instead of one each.</summary>
+        private static bool _scrollQueued;
+
         private static void Render(TextBlock output, ScrollViewer scroller, ProgressLog log)
         {
             output.Text = log.Text;
-            // ScrollableHeight only reflects the new text after a layout pass.
-            scroller.UpdateLayout();
-            scroller.ChangeView(null, scroller.ScrollableHeight, null, true);
+
+            // ScrollableHeight only reflects the new text after a layout pass — but forcing one
+            // here with UpdateLayout() made every streamed chunk a synchronous full layout, and git
+            // streams many chunks a second during a fetch. Scrolling at Low priority runs after
+            // layout has happened naturally, and the flag coalesces a burst into one scroll.
+            if (_scrollQueued)
+                return;
+            _scrollQueued = true;
+            scroller.DispatcherQueue.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () =>
+                {
+                    _scrollQueued = false;
+                    scroller.ChangeView(null, scroller.ScrollableHeight, null, true);
+                });
         }
 
         /// <summary>
