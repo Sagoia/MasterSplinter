@@ -311,6 +311,30 @@ namespace MasterSplinter.Entrypoint.Interop
             finally { MsGitFree(ptr); }
         }
 
+        /// <summary>
+        /// Copies a length-prefixed byte payload returned by the native core, then frees it.
+        /// <para>
+        /// This is the counterpart to <see cref="TakeString"/> for the exports that publish an
+        /// explicit length: their payload may contain NULs, so <c>PtrToStringUTF8</c> (which is
+        /// strlen-based) would truncate it. Used by the raw file-bytes export and by every packed
+        /// export -- see <see cref="PackedBuffer"/>.
+        /// </para>
+        /// </summary>
+        internal static byte[] TakeBytes(IntPtr ptr, int len)
+        {
+            if (ptr == IntPtr.Zero)
+                return Array.Empty<byte>();
+            try
+            {
+                if (len <= 0)
+                    return Array.Empty<byte>();
+                var buffer = new byte[len];
+                Marshal.Copy(ptr, buffer, 0, len);
+                return buffer;
+            }
+            finally { MsGitFree(ptr); }
+        }
+
         public static string GitOpenRepository(string path) => TakeString(MsGitOpenRepository(path));
         public static string GitLog(string root, int order, int maxCount) => TakeString(MsGitLog(root, order, maxCount));
         public static string GitRefDetails(string root) => TakeString(MsGitRefDetails(root));
@@ -426,17 +450,7 @@ namespace MasterSplinter.Entrypoint.Interop
         public static byte[] GitFileBytesAtCommit(string root, string sha, string path)
         {
             IntPtr ptr = MsGitFileBytesAtCommit(root, sha, path, out int len);
-            if (ptr == IntPtr.Zero)
-                return Array.Empty<byte>();
-            try
-            {
-                if (len <= 0)
-                    return Array.Empty<byte>();
-                var buffer = new byte[len];
-                Marshal.Copy(ptr, buffer, 0, len);
-                return buffer;
-            }
-            finally { MsGitFree(ptr); }
+            return TakeBytes(ptr, len);
         }
     }
 }
