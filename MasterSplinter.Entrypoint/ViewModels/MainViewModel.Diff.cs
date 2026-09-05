@@ -29,7 +29,6 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 if (_diffViewMode == mode) return;
                 _diffViewMode = mode;
                 OnPropertyChanged(nameof(IsSideBySide));
-                EnsureSideBySideRows(SelectedFile);
                 UpdateDiffViewState();
             }
         }
@@ -94,6 +93,9 @@ namespace MasterSplinter.Entrypoint.ViewModels
         private void UpdateDiffViewState()
         {
             ChangedFile? f = SelectedFile;
+            // Selection changes and completed loads need the same lazy conversion as mode changes.
+            // In particular, a cached unified diff may be revisited while side-by-side is active.
+            EnsureSideBySideRows(f);
             bool hasFile = f != null;
             bool binary = hasFile && f!.IsBinary;
             ShowBinary = binary;

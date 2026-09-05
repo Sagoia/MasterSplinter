@@ -144,6 +144,56 @@ public class DiffCacheTests
         Assert.Empty(a.Diff);
     }
 
+    [Theory]
+    [InlineData(10, 90)]
+    [InlineData(90, 10)]
+    [InlineData(10, 0)]
+    public void ReloadingADiffUpdatesItsAccountedLineCount(int originalLines, int reloadedLines)
+    {
+        var cache = new DiffCache(maxLines: 100);
+        ChangedFile file = Loaded("f", originalLines);
+        cache.Retain(file);
+
+        ReplaceDiff(file, reloadedLines);
+        cache.Retain(file);
+
+        Assert.Equal(1, cache.Count);
+        Assert.Equal(reloadedLines, cache.RetainedLines);
+        Assert.Equal(reloadedLines, file.Diff.Count);
+        Assert.True(file.DiffLoaded);
+    }
+
+    [Theory]
+    [InlineData(10, 90, false)]
+    [InlineData(90, 10, true)]
+    public void EvictionUsesTheReloadedDiffSize(int originalLines, int reloadedLines, bool keepReloaded)
+    {
+        var cache = new DiffCache(maxLines: 100);
+        ChangedFile reloaded = Loaded("reloaded", originalLines);
+        cache.Retain(reloaded);
+
+        ReplaceDiff(reloaded, reloadedLines);
+        cache.Retain(reloaded);
+        ChangedFile next = Loaded("next", 90);
+        cache.Retain(next);
+
+        Assert.Equal(keepReloaded, reloaded.DiffLoaded);
+        Assert.True(next.DiffLoaded);
+        Assert.Equal(keepReloaded ? 2 : 1, cache.Count);
+        Assert.Equal(reloaded.Diff.Count + next.Diff.Count, cache.RetainedLines);
+        Assert.InRange(cache.RetainedLines, 0, 100);
+    }
+
+    private static void ReplaceDiff(ChangedFile file, int lines)
+    {
+        // Whitespace changes replace the same file's collections before the VM calls Retain.
+        ChangedFile replacement = Loaded(file.Path, lines);
+        file.Diff.Clear();
+        foreach (DiffLine line in replacement.Diff) file.Diff.Add(line);
+        file.Rows.Clear();
+        foreach (DiffRow row in replacement.Rows) file.Rows.Add(row);
+    }
+
     [Fact]
     public void BrowsingManyCommitsStaysBounded()
     {

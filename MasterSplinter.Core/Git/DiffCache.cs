@@ -28,8 +28,12 @@ namespace MasterSplinter.Entrypoint.Git
         public const int DefaultMaxLines = 20_000;
 
         private readonly int _maxLines;
-        private readonly LinkedList<ChangedFile> _order = new();   // most-recently-used at the front
-        private readonly Dictionary<ChangedFile, LinkedListNode<ChangedFile>> _nodes =
+        // Keep the accounted size independent of the mutable diff collection: a reload replaces
+        // that collection before Retain is called again.
+        private readonly record struct Entry(ChangedFile File, int LineCount);
+
+        private readonly LinkedList<Entry> _order = new();   // most-recently-used at the front
+        private readonly Dictionary<ChangedFile, LinkedListNode<Entry>> _nodes =
             new(ReferenceEqualityComparer.Instance);
 
         public DiffCache(int maxLines = DefaultMaxLines) => _maxLines = maxLines;
@@ -50,13 +54,13 @@ namespace MasterSplinter.Entrypoint.Git
             if (file == null)
                 return;
 
-            if (_nodes.TryGetValue(file, out LinkedListNode<ChangedFile>? existing))
+            if (_nodes.TryGetValue(file, out LinkedListNode<Entry>? existing))
             {
-                RetainedLines -= existing.Value.Diff.Count;
+                RetainedLines -= existing.Value.LineCount;
                 _order.Remove(existing);
             }
 
-            LinkedListNode<ChangedFile> node = _order.AddFirst(file);
+            LinkedListNode<Entry> node = _order.AddFirst(new Entry(file, file.Diff.Count));
             _nodes[file] = node;
             RetainedLines += file.Diff.Count;
 
@@ -66,8 +70,8 @@ namespace MasterSplinter.Entrypoint.Git
         /// <summary>Drops everything, e.g. when the repository closes or the log is rebuilt.</summary>
         public void Clear()
         {
-            foreach (ChangedFile file in _order)
-                Release(file);
+            foreach (Entry entry in _order)
+                Release(entry.File);
             _order.Clear();
             _nodes.Clear();
             RetainedLines = 0;
@@ -78,13 +82,13 @@ namespace MasterSplinter.Entrypoint.Git
             // Stop at one entry: the newest is the one on screen.
             while (RetainedLines > _maxLines && _order.Count > 1)
             {
-                LinkedListNode<ChangedFile>? oldest = _order.Last;
+                LinkedListNode<Entry>? oldest = _order.Last;
                 if (oldest == null)
                     return;
 
-                RetainedLines -= oldest.Value.Diff.Count;
-                Release(oldest.Value);
-                _nodes.Remove(oldest.Value);
+                RetainedLines -= oldest.Value.LineCount;
+                Release(oldest.Value.File);
+                _nodes.Remove(oldest.Value.File);
                 _order.RemoveLast();
             }
         }

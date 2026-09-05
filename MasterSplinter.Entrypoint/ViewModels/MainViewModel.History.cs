@@ -150,7 +150,12 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 _filterTimer = _dispatcherQueue.CreateTimer();
                 _filterTimer.Interval = TimeSpan.FromMilliseconds(FilterDebounceMs);
                 _filterTimer.IsRepeating = false;
-                _filterTimer.Tick += (_, _) => ApplyFilter();
+                _filterTimer.Tick += (_, _) =>
+                {
+                    // A tick may already be queued when a Git search replaces the ordinary log.
+                    if (!IsSearchResultMode)
+                        ApplyFilter();
+                };
             }
 
             // Trailing edge: each keystroke restarts the window, so a burst of typing filters once.
@@ -272,6 +277,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
         private async Task LoadSearchResultsAsync()
         {
             if (_repo == null) return;
+            _filterTimer?.Stop();
             GitRepository repo = _repo;
             SearchMode mode = _activeSearchMode;
             string query = _activeSearchQuery;
