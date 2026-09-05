@@ -15,15 +15,13 @@ namespace ms
     {
         if (root.empty() || sha.empty())
             return std::string();
-        // --first-parent -m: for merges, show changes vs the first parent (Phase 1 simple).
         // --root: the initial commit lists its files instead of being empty.
-        // Output is line-based "status<TAB>path" (entries separated by newlines). We deliberately
-        // do NOT use -z: a NUL-separated payload would be truncated at the first NUL by the managed
-        // string marshaller. core.quotePath=false keeps non-ASCII paths literal.
-        return RunRaw(root, GitArgs{}
+        // FirstParentMerges + RunPathList carry the merge and -z rules; see their declarations.
+        return RunPathList(root, GitArgs{}
             .QuotePathOff()
             .Add({ "diff-tree", "--no-commit-id", "-r", "-M", "--root",
-                   "--first-parent", "-m", "--name-status" })
+                   "--first-parent", "--name-status" })
+            .FirstParentMerges()
             .Add(sha));
     }
 
@@ -33,6 +31,7 @@ namespace ms
             return std::string();
         return RunRaw(root, GitArgs{ "diff-tree", "--shortstat", "-M", "--first-parent",
                                      "--root", "--no-commit-id" }
+            .FirstParentMerges()
             .Add(sha));
     }
 
@@ -43,6 +42,7 @@ namespace ms
             return std::string();
         return RunRaw(root, GitArgs{ "diff-tree", "-p", "-M", "--first-parent", "--root",
                                      "--no-commit-id", "--no-color" }
+            .FirstParentMerges()
             .Whitespace(wsMode)
             .Add(sha)
             .Path(path));
@@ -62,7 +62,7 @@ namespace ms
     {
         if (root.empty() || a.empty() || b.empty())
             return std::string();
-        return RunRaw(root, GitArgs{}
+        return RunPathList(root, GitArgs{}
             .QuotePathOff()
             .Add({ "diff", "--name-status", "-M" })
             .Add(a)

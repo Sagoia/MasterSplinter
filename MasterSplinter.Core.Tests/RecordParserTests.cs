@@ -104,7 +104,7 @@ public class RecordParserTests
     public void NameStatusMapsCodesToStatuses()
     {
         IReadOnlyList<ChangedFile> files = GitRepository.ParseNameStatus(
-            "A\tadded.txt\nM\tmodified.txt\nD\tgone.txt\n");
+            "A\u001eadded.txt\u001eM\u001emodified.txt\u001eD\u001egone.txt\u001e");
 
         Assert.Equal(3, files.Count);
         Assert.Equal(FileChangeStatus.Added, files[0].Status);
@@ -115,8 +115,8 @@ public class RecordParserTests
     [Fact]
     public void RenameTargetsTheNewPathSoDiffsResolve()
     {
-        // "R100<TAB>old<TAB>new" — diff and show must address the NEW path.
-        ChangedFile file = Assert.Single(GitRepository.ParseNameStatus("R100\told.txt\tnew.txt\n"));
+        // "R100" RS "old" RS "new" - diff and show must address the NEW path.
+        ChangedFile file = Assert.Single(GitRepository.ParseNameStatus("R100\u001eold.txt\u001enew.txt\u001e"));
 
         Assert.Equal(FileChangeStatus.Renamed, file.Status);
         Assert.Equal("new.txt", file.Path);
@@ -125,9 +125,22 @@ public class RecordParserTests
     [Fact]
     public void CopyIsTreatedLikeARename()
     {
-        ChangedFile file = Assert.Single(GitRepository.ParseNameStatus("C75\tsrc.txt\tcopy.txt\n"));
+        ChangedFile file = Assert.Single(GitRepository.ParseNameStatus("C75\u001esrc.txt\u001ecopy.txt\u001e"));
         Assert.Equal(FileChangeStatus.Renamed, file.Status);
         Assert.Equal("copy.txt", file.Path);
+    }
+
+    [Fact]
+    public void PathsWithControlCharactersSurviveBecauseOfMinusZ()
+    {
+        // Regression, found by comparing against TortoiseGit (which uses -z everywhere for this
+        // reason): the line-based format C-quotes such a path, so the parser used to hand the
+        // rest of the app a quoted, backslash-escaped name - and every later diff or stage then
+        // addressed a file that does not exist. core.quotePath=false does NOT prevent it.
+        ChangedFile file = Assert.Single(GitRepository.ParseNameStatus("A\u001ea\nb.txt\u001e"));
+
+        Assert.Equal("a\nb.txt", file.Path);
+        Assert.Equal(FileChangeStatus.Added, file.Status);
     }
 
     [Fact]

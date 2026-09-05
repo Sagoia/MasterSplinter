@@ -61,6 +61,12 @@ namespace ms
         return RunGitC(root, args.Take(), code);
     }
 
+    std::string GitBackend::RunPathList(const std::string& root, GitArgs args) const
+    {
+        std::string out = RunRaw(root, std::move(args.Add("-z")));
+        NulToRs(out);
+        return out;
+    }
     std::string GitBackend::RunRead(const std::string& root, GitArgs args) const
     {
         int code;

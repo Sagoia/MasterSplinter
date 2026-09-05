@@ -44,6 +44,23 @@ namespace ms
         return Err("No repository root was provided");
     }
 
+    // Translate git's -z NUL separators to RS (0x1E).
+    //
+    // WHY -z AT ALL: in the line-based formats a path containing a quote, a backslash or a
+    // control character is C-quoted, and core.quotePath=false does NOT turn that off - it only
+    // stops non-ASCII from being escaped. -z is the only way to get the real bytes.
+    //
+    // The managed marshaller stops at the first NUL, so the payload cannot travel as NULs; RS
+    // is the record separator the C# side already splits on.
+    inline void NulToRs(std::string& s)
+    {
+        for (char& c : s)
+        {
+            if (c == '\0')
+                c = '\x1e';
+        }
+    }
+
     inline bool IsBlank(const std::string& s)
     {
         return s.find_first_not_of(" \t\r\n") == std::string::npos;

@@ -299,9 +299,50 @@ TEST(CommitFiles, BuildsNameStatusArgs)
     h.backend->CommitFiles("root", "deadbeef");
     EXPECT_EQ(h.fake->ArgsOf(0),
               (Args{ "-C", "root", "-c", "core.quotePath=false", "diff-tree", "--no-commit-id",
-                     "-r", "-M", "--root", "--first-parent", "-m", "--name-status", "deadbeef" }));
+                     "-r", "-M", "--root", "--first-parent", "--name-status",
+                     "--diff-merges=first-parent", "deadbeef", "-z" }));
 }
 
+// Merge handling is one decision shared by three commands: the file list, the stat line and the
+// per-file diff must all describe the SAME diff. `-m` looks right and is not (it emits a section
+// per parent), so pin the flag on all three rather than each one separately.
+TEST(MergeDiffs, AllThreeCommandsUseFirstParentDiffMerges)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CommitFiles("root", "merge");
+    h.backend->CommitShortStat("root", "merge");
+    h.backend->FileDiff("root", "merge", "f.txt", 0);
+    for (size_t i = 0; i < 3; ++i)
+    {
+        EXPECT_TRUE(h.fake->ArgsContain(i, "--diff-merges=first-parent")) << "call " << i;
+        EXPECT_FALSE(h.fake->ArgsContain(i, "-m")) << "call " << i;
+    }
+}
+
+// -z is not optional for the path-listing commands, so RunPathList appends it and no caller can
+// forget. Without it a path holding a quote/backslash/control char arrives C-quoted and the host
+// addresses a file that does not exist.
+TEST(PathLists, AlwaysAskGitForNulSeparatedOutput)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("", 0);
+    h.backend->CommitFiles("root", "sha");
+    h.backend->RangeFiles("root", "a", "b");
+    EXPECT_TRUE(h.fake->ArgsContain(0, "-z"));
+    EXPECT_TRUE(h.fake->ArgsContain(1, "-z"));
+}
+
+// The payload cannot travel as NULs (the managed marshaller stops at the first one), so the
+// separators are rewritten to RS. The embedded newline must survive untouched - that is the
+// whole point of -z.
+TEST(PathLists, NulSeparatorsBecomeRecordSeparators)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse(std::string("A\000a\nb.txt\000", 10), 0);
+
+    EXPECT_EQ(h.backend->CommitFiles("root", "sha"), std::string("A\036a\nb.txt\036", 10));
+}
 TEST(CommitFiles, EmptyShaReturnsEmptyWithoutCallingGit)
 {
     auto h = MakeHarness();
@@ -315,8 +356,8 @@ TEST(CommitShortStat, BuildsShortStatArgs)
     h.fake->SetResponse(" 1 file changed, 2 insertions(+)\n", 0);
     h.backend->CommitShortStat("root", "sha");
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "diff-tree", "--shortstat", "-M", "--first-parent",
-                     "--root", "--no-commit-id", "sha" }));
+              (Args{ "-C", "root", "diff-tree", "--shortstat", "-M", "--first-parent", "--root",
+                     "--no-commit-id", "--diff-merges=first-parent", "sha" }));
 }
 
 // ---- Diffs (whitespace flag mapping) -----------------------------------------------------------
@@ -327,8 +368,9 @@ TEST(FileDiff, NoWhitespaceFlagAndArgOrder)
     h.fake->SetResponse("@@ -1 +1 @@\n", 0);
     h.backend->FileDiff("root", "sha", "path/to/file.cpp", 0);
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "diff-tree", "-p", "-M", "--first-parent", "--root",
-                     "--no-commit-id", "--no-color", "sha", "--", "path/to/file.cpp" }));
+              (Args{ "-C", "root", "diff-tree", "-p", "-M", "--first-parent", "--root", "--no-commit-id",
+                     "--no-color", "--diff-merges=first-parent", "sha", "--",
+                     "path/to/file.cpp" }));
 }
 
 TEST(FileDiff, IgnoreSpaceChangeFlag)
@@ -382,7 +424,7 @@ TEST(RangeFiles, BuildsDiffNameStatusWithAThenB)
     h.backend->RangeFiles("root", "v1", "v2");
     EXPECT_EQ(h.fake->ArgsOf(0),
               (Args{ "-C", "root", "-c", "core.quotePath=false", "diff", "--name-status",
-                     "-M", "v1", "v2" }));
+                     "-M", "v1", "v2", "-z" }));
 }
 
 TEST(RangeShortStat, BuildsArgs)

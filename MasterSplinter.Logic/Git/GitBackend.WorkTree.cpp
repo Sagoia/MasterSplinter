@@ -29,16 +29,15 @@ namespace ms
         //
         // -z: NUL-separated records, paths unquoted; a rename record is "XY new\0orig\0" (new path
         // first — reversed vs the human-readable format).
+        //
+        // NOT RunPathList, deliberately: that verb is RunRaw-based (exit code ignored), and a
+        // failed `status` must yield "" rather than a half-payload the host would render as a
+        // clean tree. Porcelain also packs "XY <path>" into ONE token, where --name-status emits
+        // the status and each path separately — different record shape, same NUL translation.
         std::string out = RunRead(root, GitArgs{}
             .QuotePathOff()
             .Add({ "status", "--porcelain=v1", "-z", "--untracked-files=all" }));
-        // A char* return is truncated at the first NUL by the managed marshaller, so translate
-        // every NUL separator to the RS (0x1E) record separator the C# side already splits on.
-        for (char& c : out)
-        {
-            if (c == '\0')
-                c = '\x1e';
-        }
+        NulToRs(out);
         return out;
     }
 

@@ -252,6 +252,13 @@ namespace ms
         // host's field-count floor already discards git's error text.
         std::string RunRaw(const std::string& root, GitArgs args) const;
 
+        // Path list: like RunRaw, but for commands that emit PATHS (--name-status and friends).
+        // Appends -z and translates git's NUL separators to RS, so the two can never drift
+        // apart. Without -z a path containing a quote, backslash or control character arrives
+        // C-quoted -- core.quotePath=false does NOT prevent that -- and the host would then
+        // address a file that does not exist. Records are not fixed width: a status token is
+        // followed by one path, or by two (old then new) for R/C.
+        std::string RunPathList(const std::string& root, GitArgs args) const;
         // Read: the merged output, or "" when git failed. The default for a read.
         std::string RunRead(const std::string& root, GitArgs args) const;
 

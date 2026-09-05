@@ -80,6 +80,21 @@ needs no lock. This is why the ABI has no cancel-handle exports.
 - **`for-each-ref` uses `%xx` escapes, `log --pretty` uses `%xNN`.** In a `for-each-ref` format, `%1f` emits
   byte 0x1F while `%x1f` emits the literal text `%x1f`. Get it wrong and every field parses as one blob and
   the sidebar silently empties. Both format strings are pinned by tests.
+- **Paths travel via `-z`, translated NUL -> RS by the native side.** `core.quotePath=false` only
+  stops *non-ASCII* escaping; a path containing a quote, a backslash or a control character is
+  still C-quoted in the line-based formats, so `MsGitCommitFiles`/`MsGitRangeFiles` used to hand
+  the app a filename that does not exist (`"a\nb.txt"`, quotes and backslash included). `-z` is the
+  only way to get the real bytes; `MsGitStatus` already did this, and `NulToRs` in `GitText.h` is
+  now the one implementation. NOTE the record shapes differ: porcelain packs `XY <path>` into one
+  token, while `--name-status` emits the status and each path as SEPARATE tokens - one path
+  normally, two (old then new) for R/C - so the reader walks the stream rather than splitting rows.
+- **Merge diffs need `--diff-merges=first-parent`, not `-m`.** `-m` emits one section *per parent*
+  even alongside `--first-parent`, so `MsGitCommitFiles` silently listed the union of both parents'
+  changes while `MsGitCommitShortStat` printed one shortstat line per parent — which the C# regex
+  parser then blended into a single wrong stat. Worse, without either flag `diff-tree` prints
+  **nothing** for a merge, so `MsGitFileDiff` returned empty and every file listed under a merge
+  commit opened to a blank diff pane. All three exports must carry the same flag or they describe
+  three different diffs. Requires git 2.31+. Pinned by `MergeDiffs.AllThreeCommandsUseFirstParentDiffMerges`.
 - **`MsGitStashSave` returns ERR when git stashed nothing.** `git stash push` exits 0 on a clean tree;
   reporting that as success tells the user their work is parked when it is not. It probes `refs/stash` before
   and after (3 spawns) rather than matching git's localizable message.

@@ -37,6 +37,17 @@ namespace ms
         // Keeps non-ASCII paths literal instead of C-quoted, so the host parses them as-is.
         GitArgs& QuotePathOff() { return Add({ "-c", "core.quotePath=false" }); }
 
+        // For a merge, diff against the FIRST PARENT.
+        //
+        // TRAP: `-m` does NOT do this. It emits one section PER PARENT even alongside
+        // --first-parent, which made the file list the union of both parents' changes and made
+        // --shortstat print one line per parent (the host's regex parser then blended two diffs
+        // into one wrong stat). Omitting both flags is worse still: diff-tree prints NOTHING for
+        // a merge, so every file listed under a merge opened to an empty diff pane.
+        //
+        // Every command describing the same commit must use this, or they describe different
+        // diffs. Needs git 2.31+.
+        GitArgs& FirstParentMerges() { return Add("--diff-merges=first-parent"); }
         // ---- arguments ----
 
         GitArgs& Add(std::string arg)

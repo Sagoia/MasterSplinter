@@ -23,24 +23,30 @@ namespace MasterSplinter.Entrypoint.Git
         internal static IReadOnlyList<ChangedFile> ParseNameStatus(string raw)
         {
             var files = new List<ChangedFile>();
-            // Line-based "status<TAB>path" (rename/copy is "R100<TAB>old<TAB>new").
-            foreach (string line in raw.Split('\n'))
+            // RS-separated tokens from git's -z output (the native side maps NUL -> RS).
+            //
+            // Records are NOT fixed width: a token is a status, followed by ONE path -- or by
+            // TWO (old then new) when the status starts with R or C. So walk the stream; there
+            // is no row separator to split on.
+            //
+            // -z is what makes a path holding a quote, backslash or control character survive.
+            // The line-based format C-quotes such paths and core.quotePath=false does
+            // NOT stop it -- that only suppresses non-ASCII escaping.
+            string[] t = raw.Split('\u001e');
+            for (int i = 0; i < t.Length; i++)
             {
-                string l = line.Trim('\r');
-                if (l.Length == 0)
+                string status = t[i];
+                if (status.Length == 0)
                     continue;
 
-                string[] parts = l.Split('\t');
-                if (parts.Length < 2)
-                    continue;
+                bool pair = status[0] is 'R' or 'C';
+                int extra = pair ? 2 : 1;
+                if (i + extra >= t.Length)
+                    break; // truncated tail
 
-                string status = parts[0];
-                // For rename/copy, diff + show should target the new path (the last field).
-                string path = status.Length > 0 && status[0] is 'R' or 'C' && parts.Length >= 3
-                    ? parts[2]
-                    : parts[1];
-
-                files.Add(new ChangedFile { Path = path, Status = MapStatus(status[0]) });
+                // For rename/copy, diff + show must target the NEW path (the last field).
+                files.Add(new ChangedFile { Path = t[i + extra], Status = MapStatus(status[0]) });
+                i += extra;
             }
             return files;
         }
