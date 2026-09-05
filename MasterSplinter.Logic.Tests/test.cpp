@@ -10,6 +10,7 @@
 #include "Git/GitBackend.h"
 #include "FakeProcessRunner.h"
 #include "PackedRead.h"
+#include "Parse/BlameParser.h"
 #include "Parse/DiffParser.h"
 
 // Unit tests for the portable git command builder (the Bridge abstraction). Every test injects a
@@ -1907,9 +1908,13 @@ TEST(StashApplyPopDrop, ConflictArrivesAsErrCarryingGitsText)
 TEST(Blame, BuildsPorcelainArgsAndDefaultsToHead)
 {
     auto h = MakeHarness();
-    h.fake->SetResponse("abc 1 1 1\n\tline\n", 0);
-    EXPECT_EQ(h.backend->Blame("root", "", "src/a.cpp", false, ""),
-              "OK" + US + "abc 1 1 1\n\tline\n");
+    h.fake->SetResponse("abc 1 1 1\nauthor Alice\n\tline\n", 0);
+
+    const mstest::PackedRead p(h.backend->Blame("root", "", "src/a.cpp", false, ""));
+    EXPECT_FALSE(p.IsError());
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kBlameOffText), "line");
+
     // --porcelain, not --line-porcelain: the latter repeats every header on every line.
     EXPECT_EQ(h.fake->ArgsOf(0),
               (Args{ "-C", "root", "-c", "core.quotePath=false", "blame", "--porcelain",
@@ -1943,47 +1948,63 @@ TEST(Blame, MoveDetectionModesMapToTheirFlags)
 
 TEST(Blame, RejectsBadInputWithoutSpawningGit)
 {
+    // Failure travels in the packed header now, not as OK/ERR framing -- but the refusals and
+    // their messages are unchanged, and still cost no git spawn.
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->Blame("", "HEAD", "a", false, ""),
-              "ERR" + US + "No repository root was provided");
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "  ", false, ""),
-              "ERR" + US + "No file was provided");
+    auto message = [&](const std::string& packed) { return mstest::PackedRead(packed).Error(); };
+
+    EXPECT_EQ(message(h.backend->Blame("", "HEAD", "a", false, "")),
+              "No repository is open.");
+    EXPECT_EQ(message(h.backend->Blame("root", "HEAD", "  ", false, "")),
+              "No file was provided");
     // A leading '-' would be read as an option; git's --end-of-options needs 2.24, so refuse.
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "-rf", false, ""),
-              "ERR" + US + "Invalid revision or path");
-    EXPECT_EQ(h.backend->Blame("root", "--all", "a", false, ""),
-              "ERR" + US + "Invalid revision or path");
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a", false, "aggressive"),
-              "ERR" + US + "Unknown move detection mode: aggressive");
+    EXPECT_EQ(message(h.backend->Blame("root", "HEAD", "-rf", false, "")),
+              "Invalid revision or path");
+    EXPECT_EQ(message(h.backend->Blame("root", "--all", "a", false, "")),
+              "Invalid revision or path");
+    EXPECT_EQ(message(h.backend->Blame("root", "HEAD", "a", false, "aggressive")),
+              "Unknown move detection mode: aggressive");
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
 TEST(Blame, BinaryFilesAreRefusedRatherThanTruncated)
 {
     auto h = MakeHarness();
-    // A NUL anywhere in the payload would truncate the whole string at the managed marshaller,
-    // silently showing a fraction of the file as if it were all of it.
-    h.fake->SetResponse(std::string("abc 1 1 1\n\t\x00\x01binary", 21), 0);
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a.png", false, ""),
-              "ERR" + US + "This file is binary; blame is not available.");
+    // The packed format carries NULs safely, so this is no longer a transport limit -- it is kept
+    // because per-line authorship over binary content is noise, and saying so is more useful.
+    // Built rather than written as one literal: C++ hex escapes are greedy the same way C# ones
+    // are, so "\x01binary" is 0x1B followed by "inary" -- and the old explicit length read past
+    // the end of the literal.
+    std::string payload = "abc 1 1 1\n\t";
+    payload.push_back('\0');
+    payload += "binary";
+    h.fake->SetResponse(payload, 0);
+
+    const mstest::PackedRead p(h.backend->Blame("root", "HEAD", "a.png", false, ""));
+    EXPECT_TRUE(p.IsError());
+    EXPECT_EQ(p.Error(), "This file is binary; blame is not available.");
 }
 
-TEST(Blame, ErrCarriesGitsOwnMessage)
+TEST(Blame, FailureCarriesGitsOwnMessage)
 {
     auto h = MakeHarness();
     h.fake->SetResponse("fatal: no such path 'gone.txt' in HEAD\n", 128);
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "gone.txt", false, ""),
-              "ERR" + US + "fatal: no such path 'gone.txt' in HEAD");
+
+    const mstest::PackedRead p(h.backend->Blame("root", "HEAD", "gone.txt", false, ""));
+    EXPECT_TRUE(p.IsError());
+    EXPECT_EQ(p.Error(), "fatal: no such path 'gone.txt' in HEAD");
 }
 
 TEST(Blame, PayloadMayContainTheFieldSeparator)
 {
     auto h = MakeHarness();
-    // The host splits on the FIRST 0x1F only; file content that happens to contain one must
-    // survive intact rather than being read as a field boundary.
+    // File content that happens to contain 0x1F used to force the host to split on the FIRST
+    // separator only. Length prefixes remove the hazard entirely: it is just a byte.
     h.fake->SetResponse("abc 1 1 1\n\tvalue" + US + "other\n", 0);
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a", false, ""),
-              "OK" + US + "abc 1 1 1\n\tvalue" + US + "other\n");
+
+    const mstest::PackedRead p(h.backend->Blame("root", "HEAD", "a", false, ""));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kBlameOffText), "value" + US + "other");
 }
 
 // ---- Search (Phase 8, SEARCH-001/002) ----------------------------------------------------------
@@ -2161,7 +2182,8 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
     EXPECT_EQ(backend.StashApply("root", ""), "ERR" + US + "git stash apply failed");
     EXPECT_EQ(backend.StashPop("root", ""), "ERR" + US + "git stash pop failed");
     EXPECT_EQ(backend.StashDrop("root", ""), "ERR" + US + "git stash drop failed");
-    EXPECT_EQ(backend.Blame("root", "HEAD", "a", false, ""), "ERR" + US + "git blame failed");
+    EXPECT_EQ(mstest::PackedRead(backend.Blame("root", "HEAD", "a", false, "")).Error(),
+              "git blame failed");
     EXPECT_EQ(backend.SearchLog("root", "message", "x", "", 0, 10, true, false, false), "");
     EXPECT_EQ(backend.Reflog("root", "HEAD", 10), "");
 }

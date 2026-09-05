@@ -285,7 +285,8 @@ namespace MasterSplinter.Entrypoint.Interop
                                                 [MarshalAs(UnmanagedType.LPUTF8Str)] string rev,
                                                 [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
                                                 [MarshalAs(UnmanagedType.I1)] bool ignoreWhitespace,
-                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string detectMoves);
+                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string detectMoves,
+                                                out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitSearchLog", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitSearchLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -392,8 +393,14 @@ namespace MasterSplinter.Entrypoint.Interop
         public static string GitStashApply(string root, string refName) => TakeString(MsGitStashApply(root, refName));
         public static string GitStashPop(string root, string refName) => TakeString(MsGitStashPop(root, refName));
         public static string GitStashDrop(string root, string refName) => TakeString(MsGitStashDrop(root, refName));
-        public static string GitBlame(string root, string rev, string path, bool ignoreWhitespace, string detectMoves)
-            => TakeString(MsGitBlame(root, rev, path, ignoreWhitespace, detectMoves));
+        /// <summary>Per-line authorship as a packed buffer; failure travels in its header.</summary>
+        public static PackedBuffer GitBlame(string root, string rev, string path, bool ignoreWhitespace,
+                                            string detectMoves)
+        {
+            IntPtr ptr = MsGitBlame(root, rev, path, ignoreWhitespace, detectMoves, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+
         public static string GitSearchLog(string root, string mode, string query, string pathFilter,
                                           int order, int maxCount, bool matchCase, bool useRegex, bool allBranches)
             => TakeString(MsGitSearchLog(root, mode, query, pathFilter, order, maxCount, matchCase, useRegex, allBranches));

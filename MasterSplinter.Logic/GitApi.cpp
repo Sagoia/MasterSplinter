@@ -520,9 +520,10 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashDrop(const char* root, const 
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitBlame(const char* root, const char* rev,
                                                     const char* path, bool ignoreWhitespace,
-                                                    const char* detectMoves)
+                                                    const char* detectMoves, int* outLen)
 {
-    return CallWrite(&ms::GitBackend::Blame, root, rev, path, ignoreWhitespace, detectMoves);
+    return CallPacked(outLen, ms::packed::Kind::Blame, &ms::GitBackend::Blame,
+                      root, rev, path, ignoreWhitespace, detectMoves);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitSearchLog(const char* root, const char* mode,

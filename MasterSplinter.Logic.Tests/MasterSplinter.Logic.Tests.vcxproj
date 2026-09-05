@@ -189,6 +189,9 @@
     <ClCompile Include="..\MasterSplinter.Logic\Packed\PackedWriter.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Parse\BlameParser.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\MasterSplinter.Logic\Parse\DiffParser.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

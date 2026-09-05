@@ -59,6 +59,14 @@ namespace mstest
             return static_cast<std::int32_t>(U32(RecordAt(rec) + field));
         }
 
+        std::int64_t RecI64(std::uint32_t rec, std::uint32_t field) const
+        {
+            const std::size_t at = RecordAt(rec) + field;
+            const std::uint64_t lo = U32(at);
+            const std::uint64_t hi = U32(at + 4);
+            return static_cast<std::int64_t>(lo | (hi << 32));
+        }
+
         // A string field: an {off, len} pair pointing into the heap.
         std::string RecStr(std::uint32_t rec, std::uint32_t field) const
         {

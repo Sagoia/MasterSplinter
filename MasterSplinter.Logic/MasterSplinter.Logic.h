@@ -315,17 +315,22 @@ extern "C" {
 	// detectMoves selects how hard git looks for moved/copied lines — a NAME, not an int:
 	//   "" | "none"  no detection      "file"    -M      (moved within this file)
 	//   "commit"     -C                "any"     -C -C   (also from files the commit created)
-	// Anything else returns ERR without spawning git.
+	// Anything else fails without spawning git.
 	//
-	// Returns "OK\x1f<raw --porcelain output>" or "ERR\x1f<message>". This read is OK/ERR-framed
-	// (unlike MsGitLog and friends) because "that path is not in that revision" is a routine,
-	// actionable failure whose message is worth keeping. Split on the FIRST 0x1F only: the payload
-	// is file content and may contain 0x1F bytes of its own.
+	// PACKED (Kind::Blame). Per-line authorship, already parsed -- see Packed/PackedFormat.h for
+	// the buffer layout and Parse/BlameParser.h for the record fields. *outLen holds the byte
+	// count; the payload MAY contain NULs, so copy exactly that many bytes.
 	//
-	// A binary file is refused with ERR rather than returned: --porcelain content lines are raw
-	// file bytes, and a NUL would truncate the whole payload at the managed marshaller.
+	// Failure travels in the buffer header (status + message) rather than as OK/ERR framing.
+	// "That path is not in that revision" is a routine, actionable failure whose message is
+	// worth keeping, which is why this read reports one at all.
+	//
+	// A binary file is still refused rather than blamed. That used to be forced by the marshaller
+	// (a NUL truncated the payload); the packed format carries NULs safely, so it is now kept
+	// because per-line authorship over binary content is noise.
 	MASTERSPLINTERLOGIC_API char* MsGitBlame(const char* root, const char* rev, const char* path,
-	                                         bool ignoreWhitespace, const char* detectMoves);
+	                                         bool ignoreWhitespace, const char* detectMoves,
+	                                         int* outLen);
 
 	// Commit search. Records are byte-identical to MsGitLog's 12-field layout, so one host-side
 	// parser serves both. `mode` picks exactly ONE git predicate — deliberately one, because git
