@@ -10,6 +10,7 @@
 #include "GitText.h"
 
 #include "../Parse/DiffParser.h"
+#include "../Parse/StatusParser.h"
 
 namespace ms
 {
@@ -18,7 +19,7 @@ namespace ms
     std::string GitBackend::Status(const std::string& root) const
     {
         if (root.empty())
-            return std::string();
+            return parse::ParsePorcelainStatus("");
         // NO --no-optional-locks, deliberately. It suppresses git's opportunistic rewrite of
         // .git/index — which sounds like it protects the app's file watcher, but measured on a
         // 3000-file repo it costs ~4.6x on every call (629/835/688/440 ms with the flag vs
@@ -36,11 +37,9 @@ namespace ms
         // failed `status` must yield "" rather than a half-payload the host would render as a
         // clean tree. Porcelain also packs "XY <path>" into ONE token, where --name-status emits
         // the status and each path separately — different record shape, same NUL translation.
-        std::string out = RunRead(root, GitArgs{}
+        return parse::ParsePorcelainStatus(RunRead(root, GitArgs{}
             .QuotePathOff()
-            .Add({ "status", "--porcelain=v1", "-z", "--untracked-files=all" }));
-        NulToRs(out);
-        return out;
+            .Add({ "status", "--porcelain=v1", "-z", "--untracked-files=all" })));
     }
 
     std::string GitBackend::WorkTreeFileDiff(const std::string& root, const std::string& path,

@@ -249,9 +249,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root)
 
 // ---- Commit inspection ---------------------------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha, int* outLen)
 {
-    return CallRead(&ms::GitBackend::CommitFiles, root, sha);
+    return CallPacked(outLen, ms::packed::Kind::NameStatus, &ms::GitBackend::CommitFiles, root, sha);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha)
@@ -272,9 +272,10 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileAtCommit(const char* root, con
 
 // ---- Compare two commits / refs --------------------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b,
+                                                         int* outLen)
 {
-    return CallRead(&ms::GitBackend::RangeFiles, root, a, b);
+    return CallPacked(outLen, ms::packed::Kind::NameStatus, &ms::GitBackend::RangeFiles, root, a, b);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b)
@@ -290,9 +291,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, co
 
 // ---- Working tree (Phase 3) ------------------------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root, int* outLen)
 {
-    return CallRead(&ms::GitBackend::Status, root);
+    return CallPacked(outLen, ms::packed::Kind::Status, &ms::GitBackend::Status, root);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitWorkTreeFileDiff(const char* root, const char* path,

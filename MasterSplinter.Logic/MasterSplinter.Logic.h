@@ -69,7 +69,7 @@ extern "C" {
 	MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root);
 
 	// Tab-separated git name-status for one commit: "<status>\t<path>[\t<newPath>]" per line.
-	MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha);
+	MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha, int* outLen);
 
 	// One-line "--shortstat" summary for a commit ("N files changed, X insertions(+), Y deletions(-)").
 	MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha);
@@ -90,7 +90,8 @@ extern "C" {
 	// a and b may be full SHAs OR ref names (branch/tag/HEAD); git diff accepts either.
 
 	// Tab-separated name-status for the diff between a and b ("<status>\t<path>[\t<newPath>]").
-	MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b);
+	MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b,
+	                                              int* outLen);
 
 	// One-line "--shortstat" summary for the diff between a and b.
 	MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b);
@@ -106,7 +107,12 @@ extern "C" {
 	// "XY <path>"; when X or Y is R/C the record is followed by one extra record holding the
 	// ORIGINAL path (new path first — -z order is reversed vs the human-readable format).
 	// Untracked files appear as "?? <path>" (--untracked-files=all). Empty string on error.
-	MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root);
+	// PACKED (Kind::Status). One record per (file, section) -- a file that is both staged and
+	// modified again yields TWO, a conflicted file exactly one. See Parse/StatusParser.h.
+	//
+	// NOTE the section values match the host WorkTreeArea enum (0=staged), NOT the `area`
+	// PARAMETER of MsGitWorkTreeFileDiff below (0=unstaged). Two orderings, one word; both pinned.
+	MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root, int* outLen);
 
 	// PACKED (Kind::Diff), as MsGitFileDiff, for one working-tree file.
 	// area: 0 = unstaged (worktree vs index), 1 = staged (index vs HEAD, --cached),

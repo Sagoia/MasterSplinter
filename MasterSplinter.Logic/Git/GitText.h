@@ -52,15 +52,6 @@ namespace ms
     //
     // The managed marshaller stops at the first NUL, so the payload cannot travel as NULs; RS
     // is the record separator the C# side already splits on.
-    inline void NulToRs(std::string& s)
-    {
-        for (char& c : s)
-        {
-            if (c == '\0')
-                c = '\x1e';
-        }
-    }
-
     inline bool IsBlank(const std::string& s)
     {
         return s.find_first_not_of(" \t\r\n") == std::string::npos;

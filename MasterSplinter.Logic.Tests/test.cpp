@@ -12,6 +12,7 @@
 #include "PackedRead.h"
 #include "Parse/BlameParser.h"
 #include "Parse/DiffParser.h"
+#include "Parse/StatusParser.h"
 
 // Unit tests for the portable git command builder (the Bridge abstraction). Every test injects a
 // FakeProcessRunner into GitBackend, so nothing here spawns git.exe or touches a repository — the
@@ -350,17 +351,24 @@ TEST(PathLists, AlwaysAskGitForNulSeparatedOutput)
 // The payload cannot travel as NULs (the managed marshaller stops at the first one), so the
 // separators are rewritten to RS. The embedded newline must survive untouched - that is the
 // whole point of -z.
-TEST(PathLists, NulSeparatorsBecomeRecordSeparators)
+TEST(PathLists, PathsWithControlCharactersSurviveTheNulStream)
 {
+    // -z is what makes a path holding a newline, quote or backslash survive: the line-based
+    // format C-quotes it, and core.quotePath=false only suppresses NON-ASCII escaping. Nothing
+    // translates NUL to 0x1E any more -- the parser reads the NUL stream directly, which is what
+    // stops a path CONTAINING 0x1E from desyncing the list.
     auto h = MakeHarness();
-    h.fake->SetResponse(std::string("A\000a\nb.txt\000", 10), 0);
+    h.fake->SetResponse(std::string("A\0a\nb.txt\0", 10), 0);
 
-    EXPECT_EQ(h.backend->CommitFiles("root", "sha"), std::string("A\036a\nb.txt\036", 10));
+    const mstest::PackedRead p(h.backend->CommitFiles("root", "sha"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kFileOffPath), "a\nb.txt");
 }
-TEST(CommitFiles, EmptyShaReturnsEmptyWithoutCallingGit)
+
+TEST(CommitFiles, EmptyShaReturnsNoRecordsWithoutCallingGit)
 {
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->CommitFiles("root", ""), "");
+    EXPECT_EQ(mstest::PackedRead(h.backend->CommitFiles("root", "")).Count(), 0u);
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
@@ -492,34 +500,74 @@ TEST(Status, BuildsPorcelainArgs)
                      "status", "--porcelain=v1", "-z", "--untracked-files=all" }));
 }
 
-TEST(Status, TranslatesNulsToRecordSeparators)
+TEST(Status, SplitsEntriesIntoTheirSections)
 {
     auto h = MakeHarness();
     const std::string raw("M  a.txt\0?? b.txt\0", 18);
     h.fake->SetResponse(raw, 0);
-    EXPECT_EQ(h.backend->Status("root"), "M  a.txt\x1e?? b.txt\x1e");
+
+    const mstest::PackedRead p(h.backend->Status("root"));
+    ASSERT_EQ(p.Count(), 2u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kFileOffPath), "a.txt");
+    EXPECT_EQ(p.RecU8(0, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Staged));
+    EXPECT_EQ(p.RecStr(1, ms::parse::kFileOffPath), "b.txt");
+    EXPECT_EQ(p.RecU8(1, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Untracked));
 }
 
-TEST(Status, RenameKeepsBothPathRecords)
+TEST(Status, RenameKeepsBothPaths)
 {
     auto h = MakeHarness();
-    // -z rename record: "R  new\0orig\0" — new path first, original second.
+    // -z rename record: "R  new\0orig\0" -- new path first, original second.
     const std::string raw("R  new.txt\0old.txt\0", 19);
     h.fake->SetResponse(raw, 0);
-    EXPECT_EQ(h.backend->Status("root"), "R  new.txt\x1eold.txt\x1e");
+
+    const mstest::PackedRead p(h.backend->Status("root"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kFileOffPath), "new.txt");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kFileOffOldPath), "old.txt");
 }
 
-TEST(Status, EmptyOnGitError)
+TEST(Status, AFileBothStagedAndModifiedAgainYieldsOneRecordPerSection)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse(std::string("MM a.txt\0", 9), 0);
+
+    const mstest::PackedRead p(h.backend->Status("root"));
+    ASSERT_EQ(p.Count(), 2u);
+    EXPECT_EQ(p.RecU8(0, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Staged));
+    EXPECT_EQ(p.RecU8(1, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Unstaged));
+}
+
+TEST(Status, AConflictedFileIsListedOnceInItsOwnSection)
+{
+    // Checked BEFORE the staged/unstaged split: both halves see a non-blank column for "UU", so
+    // without this the same conflicted file appears twice with no hint anything is wrong.
+    auto h = MakeHarness();
+    h.fake->SetResponse(std::string("UU a.txt\0", 9), 0);
+
+    const mstest::PackedRead p(h.backend->Status("root"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecU8(0, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Conflicted));
+}
+
+TEST(Status, NoRecordsOnGitError)
 {
     auto h = MakeHarness();
     h.fake->SetResponse("fatal: not a git repository", 128);
-    EXPECT_EQ(h.backend->Status("root"), "");
+    // RunRead, not RunRaw: a failed status must yield nothing rather than a half-payload the
+    // host would render as a clean tree.
+    EXPECT_EQ(mstest::PackedRead(h.backend->Status("root")).Count(), 0u);
 }
 
-TEST(Status, EmptyRootReturnsEmptyWithoutCallingGit)
+TEST(Status, EmptyRootReturnsNoRecordsWithoutCallingGit)
 {
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->Status(""), "");
+    EXPECT_EQ(mstest::PackedRead(h.backend->Status("")).Count(), 0u);
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
@@ -2104,7 +2152,9 @@ TEST(SearchLog, RejectedPatternReadsAsNoResults)
     auto h = MakeHarness();
     // A bad regex makes git exit non-zero; its complaint must not reach the record parser.
     h.fake->SetResponse("fatal: invalid regex\n", 128);
-    EXPECT_EQ(h.backend->SearchLog("root", "message", "*[", "", 0, 10, true, true, false), "");
+    EXPECT_EQ(mstest::PackedRead(
+                  h.backend->SearchLog("root", "message", "*[", "", 0, 10, true, true, false)).Count(),
+              0u);
 }
 
 TEST(SearchLog, EmptyWithoutSpawningGitWhenThereIsNothingToSearchFor)

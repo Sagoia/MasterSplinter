@@ -14,67 +14,40 @@ namespace MasterSplinter.Entrypoint.Git
         // ---- Changed files (single commit or a..b range) ---------------------------------------
 
         public IReadOnlyList<ChangedFile> ChangedFiles(string sha)
-            => ParseNameStatus(NativeLogic.GitCommitFiles(RootPath, sha));
+            => ReadFiles(NativeLogic.GitCommitFiles(RootPath, sha));
 
         /// <summary>Files changed between two commits/refs (DIFF-006 / DIFF-007).</summary>
         public IReadOnlyList<ChangedFile> ChangedFilesRange(string a, string b)
-            => ParseNameStatus(NativeLogic.GitRangeFiles(RootPath, a, b));
+            => ReadFiles(NativeLogic.GitRangeFiles(RootPath, a, b));
 
-        internal static IReadOnlyList<ChangedFile> ParseNameStatus(string raw)
+        /// <summary>
+        /// Materialises a packed changed-file list. Shared by the commit, range and working-tree
+        /// reads: one record layout serves all three (see Parse/StatusParser.h).
+        /// </summary>
+        internal static List<ChangedFile> ReadFiles(PackedBuffer buf)
         {
-            var files = new List<ChangedFile>();
-            // RS-separated tokens from git's -z output (the native side maps NUL -> RS).
-            //
-            // Records are NOT fixed width: a token is a status, followed by ONE path -- or by
-            // TWO (old then new) when the status starts with R or C. So walk the stream; there
-            // is no row separator to split on.
-            //
-            // -z is what makes a path holding a quote, backslash or control character survive.
-            // The line-based format C-quotes such paths and core.quotePath=false does
-            // NOT stop it -- that only suppresses non-ASCII escaping.
-            string[] t = raw.Split('\u001e');
-            for (int i = 0; i < t.Length; i++)
+            int count = buf.RecordCount;
+            var files = new List<ChangedFile>(count);
+            for (int i = 0; i < count; i++)
             {
-                string status = t[i];
-                if (status.Length == 0)
-                    continue;
-
-                bool pair = status[0] is 'R' or 'C';
-                int extra = pair ? 2 : 1;
-                if (i + extra >= t.Length)
-                    break; // truncated tail
-
-                // For rename/copy, diff + show must target the NEW path (the last field).
-                files.Add(new ChangedFile { Path = t[i + extra], Status = MapStatus(status[0]) });
-                i += extra;
+                files.Add(new ChangedFile
+                {
+                    Path = buf.Str(i, FileOffPath),
+                    OldPath = buf.Str(i, FileOffOldPath),
+                    Status = (FileChangeStatus)buf.U8(i, FileOffStatus),
+                    Area = (WorkTreeArea)buf.U8(i, FileOffSection),
+                    IsWorkingTree = buf.U8(i, FileOffIsWorkingTree) != 0,
+                });
             }
             return files;
         }
 
-        internal static FileChangeStatus MapStatus(char c) => c switch
-        {
-            'A' => FileChangeStatus.Added,
-            'D' => FileChangeStatus.Deleted,
-            'R' => FileChangeStatus.Renamed,
-            'C' => FileChangeStatus.Renamed,
-            '?' => FileChangeStatus.Untracked,
-            'U' => FileChangeStatus.Conflicted,
-            _ => FileChangeStatus.Modified, // M, T, ...
-        };
-
-        /// <summary>
-        /// MERGE-003. The seven porcelain-v1 code pairs that mean "unmerged", per git's own list:
-        /// DD (both deleted), AU (added by us), UD (deleted by them), UA (added by them),
-        /// DU (deleted by us), AA (both added), UU (both modified).
-        ///
-        /// This has to be checked BEFORE the staged/unstaged split, because those two halves both
-        /// see a non-blank column here — a plain "UU" would otherwise be reported as a staged
-        /// modification AND an unstaged one, i.e. the same conflicted file listed twice with no
-        /// hint that anything is wrong.
-        /// </summary>
-        internal static bool IsUnmerged(char x, char y)
-            => (x, y) is ('D', 'D') or ('A', 'U') or ('U', 'D') or ('U', 'A')
-                      or ('D', 'U') or ('A', 'A') or ('U', 'U');
+        // Record layout, mirroring Parse/StatusParser.h.
+        private const int FileOffStatus = 0;
+        private const int FileOffSection = 1;
+        private const int FileOffIsWorkingTree = 2;
+        private const int FileOffPath = 4;
+        private const int FileOffOldPath = 12;
 
         // ---- Diff summary stats (DIFF-001) -----------------------------------------------------
 

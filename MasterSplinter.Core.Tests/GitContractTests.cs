@@ -117,30 +117,4 @@ public class GitContractTests
         Assert.Equal("something else entirely", message);
     }
 
-    // ---- Unmerged detection --------------------------------------------------------------------
-    // MERGE-003: the seven unmerged XY pairs must be recognised BEFORE the staged/unstaged split,
-    // or a conflicted file (UU) is listed twice — once as staged "Modified", once as unstaged.
-
-    [Theory]
-    [InlineData('D', 'D')]
-    [InlineData('A', 'U')]
-    [InlineData('U', 'D')]
-    [InlineData('U', 'A')]
-    [InlineData('D', 'U')]
-    [InlineData('A', 'A')]
-    [InlineData('U', 'U')]
-    public void AllSevenUnmergedPairsAreRecognised(char x, char y)
-        => Assert.True(GitRepository.IsUnmerged(x, y));
-
-    [Theory]
-    [InlineData('M', 'M')]   // staged AND modified again — two rows, not a conflict
-    [InlineData('M', ' ')]
-    [InlineData(' ', 'M')]
-    [InlineData('A', ' ')]
-    [InlineData('R', ' ')]
-    [InlineData('?', '?')]
-    [InlineData('D', ' ')]
-    [InlineData(' ', 'D')]
-    public void OrdinaryStatusPairsAreNotUnmerged(char x, char y)
-        => Assert.False(GitRepository.IsUnmerged(x, y));
 }

@@ -10,21 +10,22 @@
 #include "GitText.h"
 
 #include "../Parse/DiffParser.h"
+#include "../Parse/StatusParser.h"
 
 namespace ms
 {
     std::string GitBackend::CommitFiles(const std::string& root, const std::string& sha) const
     {
         if (root.empty() || sha.empty())
-            return std::string();
+            return parse::ParseNameStatus("");
         // --root: the initial commit lists its files instead of being empty.
         // FirstParentMerges + RunPathList carry the merge and -z rules; see their declarations.
-        return RunPathList(root, GitArgs{}
+        return parse::ParseNameStatus(RunPathList(root, GitArgs{}
             .QuotePathOff()
             .Add({ "diff-tree", "--no-commit-id", "-r", "-M", "--root",
                    "--first-parent", "--name-status" })
             .FirstParentMerges()
-            .Add(sha));
+            .Add(sha)));
     }
 
     std::string GitBackend::CommitShortStat(const std::string& root, const std::string& sha) const
@@ -66,12 +67,12 @@ namespace ms
     std::string GitBackend::RangeFiles(const std::string& root, const std::string& a, const std::string& b) const
     {
         if (root.empty() || a.empty() || b.empty())
-            return std::string();
-        return RunPathList(root, GitArgs{}
+            return parse::ParseNameStatus("");
+        return parse::ParseNameStatus(RunPathList(root, GitArgs{}
             .QuotePathOff()
             .Add({ "diff", "--name-status", "-M" })
             .Add(a)
-            .Add(b));
+            .Add(b)));
     }
 
     std::string GitBackend::RangeShortStat(const std::string& root, const std::string& a, const std::string& b) const

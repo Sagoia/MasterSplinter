@@ -63,9 +63,10 @@ namespace ms
 
     std::string GitBackend::RunPathList(const std::string& root, GitArgs args) const
     {
-        std::string out = RunRaw(root, std::move(args.Add("-z")));
-        NulToRs(out);
-        return out;
+        // -z and nothing else. It used to translate NUL to 0x1E for the host's benefit; the
+        // parsers are native now and read the NUL stream directly, which removes the last place a
+        // path containing a literal 0x1E could desync the list.
+        return RunRaw(root, std::move(args.Add("-z")));
     }
     std::string GitBackend::RunRead(const std::string& root, GitArgs args) const
     {
