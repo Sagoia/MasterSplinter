@@ -74,6 +74,16 @@ namespace mstest
             return Heap(U32(at), U32(at + 4));
         }
 
+        // The kind-specific trailing section (the commit-graph display list rides here).
+        std::string Extra() const
+        {
+            const std::uint32_t off = U32(ms::packed::kOffExtraOffset);
+            const std::uint32_t len = U32(ms::packed::kOffExtraLen);
+            if (len == 0 || off + len > b_.size())
+                return std::string();
+            return b_.substr(off, len);
+        }
+
         const std::string& Bytes() const { return b_; }
 
     private:

@@ -48,6 +48,10 @@ namespace MasterSplinter.Entrypoint.Interop
         private static extern IntPtr MsGitLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root, int order,
                                               int maxCount, out int len);
 
+        [DllImport(Dll, EntryPoint = "MsGitLogGraph", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitLogGraph([MarshalAs(UnmanagedType.LPUTF8Str)] string root, int order,
+                                                   int maxCount, out int len);
+
         [DllImport(Dll, EntryPoint = "MsGitRefDetails", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitRefDetails([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                      out int len);
@@ -350,10 +354,21 @@ namespace MasterSplinter.Entrypoint.Interop
         }
 
         public static string GitOpenRepository(string path) => TakeString(MsGitOpenRepository(path));
-        /// <summary>Parsed commit records as a packed buffer.</summary>
+        /// <summary>Parsed commit records as a packed buffer, with no commit graph.</summary>
         public static PackedBuffer GitLog(string root, int order, int maxCount)
         {
             IntPtr ptr = MsGitLog(root, order, maxCount, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+
+        /// <summary>
+        /// The same records plus the commit-graph display list, in the buffer's extra section.
+        /// One spawn: a separate graph walk could disagree with the record walk if a ref moved
+        /// between them, and the lanes would then describe rows that are no longer on screen.
+        /// </summary>
+        public static PackedBuffer GitLogGraph(string root, int order, int maxCount)
+        {
+            IntPtr ptr = MsGitLogGraph(root, order, maxCount, out int len);
             return PackedBuffer.Wrap(TakeBytes(ptr, len));
         }
         /// <summary>Branches, tags and remote-tracking refs, as a packed buffer.</summary>

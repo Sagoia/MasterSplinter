@@ -70,6 +70,16 @@ namespace ms::parse
     // there is nothing after it to shift.
     std::string ParseLogRecords(std::string_view raw);
 
+    // The same records, plus the commit-graph display list in the buffer's EXTRA section
+    // (Graph/GraphLayout.h describes its bytes).
+    //
+    // One export, one git spawn, one allocation: the layout needs each commit's parents resolved
+    // to ROW positions, and the only place that mapping exists for free is right here, while the
+    // records are being built. Running it as a separate pass would mean either a second walk of
+    // the log -- which could disagree with the first if a ref moved in between -- or handing the
+    // host a job it would have to hand straight back.
+    std::string ParseLogRecordsWithGraph(std::string_view raw);
+
     // Splits git's raw message (%B) into the subject and body the host displays, reproducing what
     // %s and %b used to emit: the subject is the first paragraph with its newlines folded to
     // spaces, the body is everything after the blank line that ends it.

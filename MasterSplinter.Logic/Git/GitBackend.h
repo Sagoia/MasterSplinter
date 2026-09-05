@@ -39,6 +39,10 @@ namespace ms
         bool IsRepository(const std::string& path) const;
         std::string OpenRepository(const std::string& path) const;
         std::string Log(const std::string& root, int order, int maxCount) const;
+        // Log plus the commit-graph display list, in the packed buffer's extra section. One
+        // spawn: a second walk could disagree with the first if a ref moved between them, and
+        // the graph would then be laid out over rows that are no longer the ones on screen.
+        std::string LogGraph(const std::string& root, int order, int maxCount) const;
         std::string RefDetails(const std::string& root) const;
         std::string CommitFiles(const std::string& root, const std::string& sha) const;
         std::string CommitShortStat(const std::string& root, const std::string& sha) const;

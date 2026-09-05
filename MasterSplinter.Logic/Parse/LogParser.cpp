@@ -3,8 +3,10 @@
 #include "LogParser.h"
 
 #include "BlameParser.h"   // ParseTimezoneMinutes
+#include "../Graph/GraphLayout.h"
 #include "../Packed/PackedWriter.h"
 
+#include <unordered_map>
 #include <vector>
 
 namespace ms::parse
@@ -157,7 +159,17 @@ namespace ms::parse
             body.assign(TrimTrailingNewlines(message.substr(bodyStart)));
     }
 
-    std::string ParseLogRecords(std::string_view raw)
+    namespace
+    {
+        // Collected while the records are built, so the graph pass needs no second walk.
+        struct Topology
+        {
+            std::unordered_map<std::string, std::int32_t> rowOfHash;
+            std::vector<std::vector<std::string>> parentsByRow;
+        };
+    }
+
+    static std::string Parse(std::string_view raw, Topology* topology)
     {
         PackedWriter w(packed::Kind::Log, kLogRecordSize);
 
@@ -198,6 +210,8 @@ namespace ms::parse
             fields.push_back(record.substr(at));
 
             parents.clear();
+            if (topology)
+                topology->parentsByRow.emplace_back();
             std::string_view parentList = fields[2];
             std::size_t p = 0;
             while (p < parentList.size())
@@ -208,7 +222,11 @@ namespace ms::parse
                 const std::string_view one = parentList.substr(
                     p, space == std::string_view::npos ? std::string_view::npos : space - p);
                 if (!one.empty())
+                {
                     parents.push_back(w.AddString(one));
+                    if (topology)
+                        topology->parentsByRow.back().emplace_back(one);
+                }
                 if (space == std::string_view::npos)
                     break;
                 p = space + 1;
@@ -218,6 +236,14 @@ namespace ms::parse
             AppendBadges(w, fields[11], badges);
 
             SplitMessage(fields[12], subject, body);
+
+            if (topology)
+            {
+                // First occurrence wins, matching what a scan would find -- and what the host's
+                // CommitIndex does, which its tests pin.
+                topology->rowOfHash.emplace(std::string(fields[0]),
+                                            static_cast<std::int32_t>(topology->parentsByRow.size() - 1));
+            }
 
             const StringRef fullHash = w.AddString(fields[0]);
             const StringRef shortHash = w.AddString(fields[1]);
@@ -248,6 +274,34 @@ namespace ms::parse
             w.EndRecord();
         }
 
+        if (topology)
+        {
+            // Resolve each parent hash to a row. A miss is ORDINARY, not an error: the log is
+            // capped, so an edge routinely leaves the loaded window.
+            std::vector<std::vector<std::int32_t>> adjacency;
+            adjacency.reserve(topology->parentsByRow.size());
+            for (const std::vector<std::string>& hashes : topology->parentsByRow)
+            {
+                std::vector<std::int32_t> rows;
+                rows.reserve(hashes.size());
+                for (const std::string& hash : hashes)
+                {
+                    const auto it = topology->rowOfHash.find(hash);
+                    rows.push_back(it == topology->rowOfHash.end() ? -1 : it->second);
+                }
+                adjacency.push_back(std::move(rows));
+            }
+            w.SetExtra(graph::BuildDisplayList(adjacency));
+        }
+
         return w.Finish();
+    }
+
+    std::string ParseLogRecords(std::string_view raw) { return Parse(raw, nullptr); }
+
+    std::string ParseLogRecordsWithGraph(std::string_view raw)
+    {
+        Topology topology;
+        return Parse(raw, &topology);
     }
 }

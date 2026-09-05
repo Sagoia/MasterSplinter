@@ -176,6 +176,39 @@ public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
     }
 
     [Fact]
+    public void TheCommitGraphIsLaidOutOverRealHistory()
+    {
+        // The fixture has a real two-parent merge and a branch, so the lanes must actually
+        // branch. Asserted against real git rather than a hand-built adjacency list, which is
+        // the only way to catch the graph being laid out over the wrong rows.
+        IReadOnlyList<CommitRow> log = Open().Log(order: 1, maxCount: 100);
+
+        Assert.NotEmpty(log);
+        Assert.All(log, c => Assert.NotNull(c.Graph.Dot));
+        Assert.All(log, c => Assert.True(c.Graph.LaneCount >= 1));
+
+        // The merge widens the graph: at least one row has to use a second lane.
+        Assert.Contains(log, c => c.Graph.LaneCount > 1);
+
+        // And at least one row draws a diagonal -- a line that changes lane between the top and
+        // the bottom of its row is what a fork or a join looks like.
+        Assert.Contains(log, c => c.Graph.Lines.Exists(l => l.X1 != l.X2));
+
+        // Every segment stays inside its row's declared width, which is what the renderer bets on.
+        foreach (CommitRow c in log)
+        {
+            Assert.True(c.Graph.Dot!.Lane < c.Graph.LaneCount);
+            foreach (GraphLine l in c.Graph.Lines)
+            {
+                Assert.InRange(l.X1, 0, c.Graph.LaneCount - 1);
+                Assert.InRange(l.X2, 0, c.Graph.LaneCount - 1);
+                Assert.InRange(l.Y1, 0.0, 1.0);
+                Assert.InRange(l.Y2, 0.0, 1.0);
+            }
+        }
+    }
+
+    [Fact]
     public void RefsIncludeTheBranchesAndTheTag()
     {
         GitRepository.RefList refs = Open().ListRefs();

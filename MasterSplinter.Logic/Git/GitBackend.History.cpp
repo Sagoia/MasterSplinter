@@ -79,6 +79,25 @@ namespace ms
         return parse::ParseLogRecords(RunRaw(root, std::move(args)));
     }
 
+    std::string GitBackend::LogGraph(const std::string& root, int order, int maxCount) const
+    {
+        if (root.empty())
+            return parse::ParseLogRecordsWithGraph("");
+
+        bool reverse = false;
+        const char* orderFlag = LogOrderFlag(order, reverse);
+
+        GitArgs args{ "log", "--all", "--parents" };
+        args.Add(orderFlag)
+            .AddIf(reverse, "--reverse")
+            .AddIf(maxCount > 0, "-n" + std::to_string(maxCount));
+        AddLogRecordFlags(args);
+
+        // Same argv as Log, deliberately: the two must be interchangeable, so the only difference
+        // is whether the graph section is computed.
+        return parse::ParseLogRecordsWithGraph(RunRaw(root, std::move(args)));
+    }
+
     std::string GitBackend::RefDetails(const std::string& root) const
     {
         if (root.empty())

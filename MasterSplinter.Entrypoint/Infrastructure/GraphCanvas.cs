@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
+using Windows.Foundation;
 using Windows.UI;
 using MasterSplinter.Entrypoint.Models;
 
@@ -20,6 +21,15 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         private const double DotRadius = 4.0;
         private const double LineThickness = 2.0;
 
+        /// <summary>
+        /// Width of the Graph column in RepositoryWorkspace.xaml. The canvas is pinned to it and
+        /// clipped, because a real repository can need far more lanes than fit: CNTK reaches
+        /// twenty-odd once `--all` brings in its stale branches, which at 14 px each is nearly
+        /// 300 px of lines painted straight over the Description column. The placeholder never
+        /// showed this because it was always exactly one lane wide.
+        /// </summary>
+        private const double ColumnWidth = 150;
+
         public static readonly DependencyProperty RowProperty = DependencyProperty.Register(
             nameof(Row), typeof(GraphRow), typeof(GraphCanvas),
             new PropertyMetadata(null, (d, _) => ((GraphCanvas)d).Rebuild()));
@@ -33,6 +43,10 @@ namespace MasterSplinter.Entrypoint.Infrastructure
         public GraphCanvas()
         {
             Height = RowHeight;
+            Width = ColumnWidth;
+            // Clip once, in the constructor: the row height and column width are both fixed, so
+            // the geometry never changes.
+            Clip = new RectangleGeometry { Rect = new Rect(0, 0, ColumnWidth, RowHeight) };
         }
 
         private static Color Resolve(GraphColor c) => c switch
@@ -53,8 +67,6 @@ namespace MasterSplinter.Entrypoint.Infrastructure
             Children.Clear();
             var row = Row;
             if (row == null) return;
-
-            Width = LeftPad + row.LaneCount * LaneWidth;
 
             foreach (var seg in row.Lines)
             {

@@ -54,6 +54,17 @@ extern "C" {
 	MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount,
 	                                       int* outLen);
 
+	// PACKED (Kind::Log), identical to MsGitLog, plus the commit-graph display list in the
+	// buffer's EXTRA section. Byte layout in Graph/GraphLayout.h: a u32 row count, then per row
+	// laneCount/dotLane/colorIndex/flags/segCount and that many 5-byte segments. X is a lane
+	// index, Y is in half-row units (0 top, 1 centre, 2 bottom).
+	//
+	// One export rather than two calls: laying the graph out needs each commit's parents resolved
+	// to ROW positions, and a second `git log` walk could disagree with the first if a ref moved
+	// in between -- which would draw the graph against rows that are no longer on screen.
+	MASTERSPLINTERLOGIC_API char* MsGitLogGraph(const char* root, int order, int maxCount,
+	                                            int* outLen);
+
 	// One record per ref (records separated by 0x1E, fields by 0x1F) covering refs/heads,
 	// refs/tags and refs/remotes in refname order. Always exactly 8 fields, several of which are
 	// routinely empty — the field COUNT is what makes positional parsing safe:

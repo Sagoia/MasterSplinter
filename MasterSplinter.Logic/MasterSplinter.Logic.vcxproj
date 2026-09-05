@@ -196,6 +196,7 @@
     <ClInclude Include="Git\GitArgs.h" />
     <ClInclude Include="Git\GitText.h" />
     <ClInclude Include="Git\GitLogFormat.h" />
+    <ClInclude Include="Graph\GraphLayout.h" />
     <ClInclude Include="Packed\PackedFormat.h" />
     <ClInclude Include="Packed\PackedWriter.h" />
     <ClInclude Include="Parse\BlameParser.h" />
@@ -227,6 +228,7 @@
     <ClCompile Include="Git\GitBackend.Sequencer.cpp" />
     <ClCompile Include="Git\GitBackend.Stash.cpp" />
     <ClCompile Include="Git\GitBackend.Blame.cpp" />
+    <ClCompile Include="Graph\GraphLayout.cpp" />
     <ClCompile Include="Packed\PackedWriter.cpp" />
     <ClCompile Include="Parse\BlameParser.cpp" />
     <ClCompile Include="Parse\DiffParser.cpp" />

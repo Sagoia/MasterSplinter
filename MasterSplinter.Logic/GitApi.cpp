@@ -242,6 +242,12 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, i
     return CallPacked(outLen, ms::packed::Kind::Log, &ms::GitBackend::Log, root, order, maxCount);
 }
 
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitLogGraph(const char* root, int order, int maxCount,
+                                                       int* outLen)
+{
+    return CallPacked(outLen, ms::packed::Kind::Log, &ms::GitBackend::LogGraph, root, order, maxCount);
+}
+
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root, int* outLen)
 {
     return CallPacked(outLen, ms::packed::Kind::Refs, &ms::GitBackend::RefDetails, root);

@@ -14,13 +14,12 @@ namespace MasterSplinter.Entrypoint.Git
         // ---- Commit history --------------------------------------------------------------------
 
         public IReadOnlyList<CommitRow> Log(int order, int maxCount)
-            => WithGraph(ReadLog(NativeLogic.GitLog(RootPath, order, maxCount)));
-
-        /// <summary>Lays the branch graph out over a freshly parsed list. Shared by Log and
-        /// SearchLog, which produce byte-identical records and so want identical treatment.</summary>
-        private static List<CommitRow> WithGraph(List<CommitRow> commits)
         {
-            CommitGraph.Assign(commits, new CommitIndex(commits));
+            // The graph rides in the same buffer as the records, laid out natively while their
+            // parents were still resolvable to row positions.
+            PackedBuffer buf = NativeLogic.GitLogGraph(RootPath, order, maxCount);
+            List<CommitRow> commits = ReadLog(buf);
+            CommitGraph.Assign(commits, buf.Extra);
             return commits;
         }
 
@@ -177,12 +176,17 @@ namespace MasterSplinter.Entrypoint.Git
         /// commit list, detail pane and diff viewer all work on the results unchanged.
         /// An empty list means "no matches" — including for a query git rejected.
         /// </summary>
+        /// <remarks>
+        /// Deliberately no graph column. Search results are a filtered subset, so almost every
+        /// parent lies outside them; lanes drawn between them would describe a history that is not
+        /// the one being shown. The placeholder used to draw one blue lane per row here, which was
+        /// equally meaningless and looked authoritative.
+        /// </remarks>
         public IReadOnlyList<CommitRow> SearchLog(SearchMode mode, string query, string pathFilter,
                                                   int order, int maxCount, bool matchCase,
                                                   bool useRegex, bool allBranches)
-            => WithGraph(ReadLog(NativeLogic.GitSearchLog(RootPath, SearchModeArg(mode), query,
-                                                            pathFilter, order, maxCount, matchCase,
-                                                            useRegex, allBranches)));
+            => ReadLog(NativeLogic.GitSearchLog(RootPath, SearchModeArg(mode), query, pathFilter,
+                                               order, maxCount, matchCase, useRegex, allBranches));
 
         /// <summary>
         /// One commit by sha (full or abbreviated), or null if it does not resolve. Used by the
