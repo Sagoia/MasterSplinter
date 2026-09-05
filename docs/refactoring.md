@@ -103,7 +103,7 @@ four different claims. See `testing.md`.
 
 | Phase | Status |
 |---|---|
-| **D** — parsers → C++ behind a packed wire format | **Deferred.** Its testability rationale inverted during this pass: the parsers now have 213 tests in `MasterSplinter.Core`, so moving them to C++ would *lose* that coverage unless equivalent gtest cases are rewritten. Wall-clock was never the argument (git spawn dominates). **Only macOS reuse survives as a reason** — revisit if macOS becomes real. |
+| **D** - parsers to C++ behind a packed wire format | **Done** (D0-D6). The testability worry did not materialise: only the parser subset moved (~60 xunit cases, not 213), each deleted file was replaced by gtest cases in the same commit, and both suites grew overall. The deciding argument turned out to be neither macOS reuse nor wall-clock but **correctness**: a length-prefixed format makes the `0x1F`/`0x1E` desync impossible by construction. |
 | **E** — lane layout in C++ | Deferred. Groundwork is done: `CommitGraph.Assign` is the single seam (one method body to replace), `CommitIndex` provides the hash→position lookup, and `Models/Graph.cs` isolates the placeholder types. |
 | **F** — Direct2D `SwapChainPanel` renderer | Deferred. Design settled in `graph.md`. |
 

@@ -12,7 +12,7 @@ each OS keeps its own UI. Windows ships today, macOS is the next target.
 |---|---|---|
 | Native core | `MasterSplinter.Logic` (C++20 DLL) | Builds git commands behind `extern "C"` `MsGit*`/`MsLogic*`. Process execution is abstracted per OS. |
 | Interop | `MasterSplinter.Core` | `NativeLogic` is the only P/Invoke site and is `internal`; the app sees only the `NativeCore` lifecycle facade. Marshals UTF-8, frees native strings via `MsGitFree`. |
-| Git service | `MasterSplinter.Core` | Parses the delimited streams into models. Instance per open repo; replaced wholesale on refresh. Split by area into `GitRepository.<Area>.cs`, **mirroring the native `GitBackend.<Area>.cpp` files** so both sides of one ABI area sit under the same name. |
+| Git service | `MasterSplinter.Core` | **Unpacks** the packed buffers into models - parsing itself is native. Instance per open repo; replaced wholesale on refresh. Split by area into `GitRepository.<Area>.cs`, **mirroring the native `GitBackend.<Area>.cpp` files** so both sides of one ABI area sit under the same name. |
 | View models | `ViewModels/` | Selection, async loading, search. Every native call runs on `Task.Run`. |
 | UI | `Controls/`, `MainWindow.xaml`, `Themes/` | WinUI 3 shell, history + graph, diff panels, light/dark. |
 
@@ -26,6 +26,12 @@ GitApi.cpp → GitBackend (Bridge: builds git args) → IProcessRunner (Bridge/A
                                                       ├── WindowsProcessRunner  (Win32 + C++/WinRT + WIL)
                                                       └── MacProcessRunner      (Foundation NSTask + POSIX)
              chosen by IPlatformFactory / CreatePlatformFactory()  (Abstract Factory + Factory Method)
+
+GitBackend also hands git's output to Parse/* (one parser per output shape: DiffParser,
+BlameParser, LogParser, StatusParser, RefParser), which emit the packed wire format via
+Packed/PackedWriter. Each parser is a free function over a string - no git, no process runner,
+no OS - which is what makes them directly gtest-able, and why they were worth moving off the
+host at all: a macOS UI cannot call the C# ones.
 ```
 
 | Pattern | Role |
@@ -83,9 +89,17 @@ the macOS build exists.
 
 ## Wire format
 
-Delimited UTF-8: fields `0x1F` (US), records `0x1E` (RS), and the payload must be **NUL-free** — the managed
-marshaller stops at the first NUL. `git status -z` is NUL-separated, so the core translates each NUL to
-`0x1E` before returning it. The one exception is raw binary (image previews): bytes plus an explicit length.
+**Reads that return records use the packed format**: one length-prefixed binary buffer, `char*` plus an
+`int* outLen`, with a fixed-size record table and a string heap. Full layout in `Packed/PackedFormat.h`,
+conventions in **[abi.md](abi.md)**.
+
+It replaced a delimited format (fields `0x1F`, records `0x1E`) that could not represent a payload
+containing those bytes - and a commit message, a diff line, a blame line and a path all can. Records now
+separate on NUL, the one byte git guarantees is absent from commit data, and any free-form field is placed
+last so a bounded split leaves stray separators inside it.
+
+Writes and single-value reads still use the delimited convention; the payload there is git's own status
+text, which is short and structured. Raw binary (image previews) is bytes plus an explicit length.
 
 `std::filesystem::path` built from a plain `std::string` is read in the ANSI code page on Windows. Git hands
 us UTF-8, so paths are built from `std::u8string` — otherwise a repo under a non-ASCII path silently looks
@@ -171,8 +185,11 @@ Recorded here so it isn't rediscovered. See the refactor plan for the intended f
   policy into Core behind a host interface gets logic under test without touching VM construction.
 - **No C# tests**, and `MainViewModel` cannot be constructed headless (its constructor calls
   `DispatcherQueue.GetForCurrentThread()` and reads `ApplicationData`).
-- **The commit graph is a placeholder** — one blue lane per row; parents are parsed but unused. See
+- **The commit graph is a placeholder** - one blue lane per row; parents are parsed but unused. See
   **[graph.md](graph.md)**.
+- **The reflog narrows the separator problem rather than eliminating it.** It has two free-form fields
+  (`%s` and `%gs`) and only one can be last, so a `0x1F` in a commit subject can still shift into the
+  reflog subject. Bounded to one row; the stream itself cannot desync.
 
 ## Reference material
 
