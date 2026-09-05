@@ -201,6 +201,7 @@
     <ClInclude Include="Parse\BlameParser.h" />
     <ClInclude Include="Parse\DiffParser.h" />
     <ClInclude Include="Parse\LogParser.h" />
+    <ClInclude Include="Parse\RefParser.h" />
     <ClInclude Include="Parse\StatusParser.h" />
     <ClInclude Include="Platform\IProcessRunner.h" />
     <ClInclude Include="Platform\IPlatformFactory.h" />
@@ -230,6 +231,7 @@
     <ClCompile Include="Parse\BlameParser.cpp" />
     <ClCompile Include="Parse\DiffParser.cpp" />
     <ClCompile Include="Parse\LogParser.cpp" />
+    <ClCompile Include="Parse\RefParser.cpp" />
     <ClCompile Include="Parse\StatusParser.cpp" />
     <ClCompile Include="Platform\PlatformFactory.cpp" />
     <ClCompile Include="Platform\Windows\WindowsPlatformFactory.cpp" />

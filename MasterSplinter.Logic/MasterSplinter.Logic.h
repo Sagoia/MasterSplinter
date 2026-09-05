@@ -66,13 +66,16 @@ extern "C" {
 	//   6 head         "*" for the checked-out branch, otherwise a single space
 	//   7 symref       non-empty only for symbolic refs (e.g. refs/remotes/origin/HEAD)
 	// Empty string on error. NOTE: for-each-ref uses "%xx" hex escapes, NOT log's "%xNN".
-	MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root);
+	// PACKED (Kind::Refs). One record per ref, tagged Branch / Tag / RemoteBranch so the host
+	// buckets on a byte rather than re-testing the refs/ prefixes. See Parse/RefParser.h.
+	MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root, int* outLen);
 
 	// Tab-separated git name-status for one commit: "<status>\t<path>[\t<newPath>]" per line.
 	MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha, int* outLen);
 
 	// One-line "--shortstat" summary for a commit ("N files changed, X insertions(+), Y deletions(-)").
-	MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha);
+	// PACKED (Kind::ShortStat). Exactly one record: files, insertions, deletions.
+	MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha, int* outLen);
 
 	// PACKED (Kind::Diff). Unified diff for one file in one commit (no commit header), already
 	// parsed into line records -- see Packed/PackedFormat.h for the buffer layout and
@@ -94,7 +97,9 @@ extern "C" {
 	                                              int* outLen);
 
 	// One-line "--shortstat" summary for the diff between a and b.
-	MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b);
+	// PACKED (Kind::ShortStat), as MsGitCommitShortStat, for a..b.
+	MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b,
+	                                                  int* outLen);
 
 	// PACKED (Kind::Diff), as MsGitFileDiff, for one file between a and b.
 	MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
@@ -306,7 +311,8 @@ extern "C" {
 	// Empty string when there are no stashes, and on error — an empty list either way.
 	// NOTE: dropping or popping RENUMBERS every later entry, so a selector is only valid until the
 	// next stash mutation. Callers must re-read this list after any of the three.
-	MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root);
+	// PACKED (Kind::Stash). The subject is already split into branch + message.
+	MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root, int* outLen);
 
 	// git stash push [--include-untracked] [--keep-index] [-m <message>]; "OK" / "ERR\x1f<message>".
 	// A blank `message` omits -m and lets git compose its own "WIP on <branch>" text.
@@ -370,7 +376,9 @@ extern "C" {
 	//   3 reflogSubject  "commit: <subject>" / "pull: Fast-forward" / "checkout: moving from..."
 	//   4 dateISO    5 author    6 commitSubject  (%s — often fuller than the reflog subject)
 	// A ref with no reflog makes git exit non-zero, which yields "" — an empty list, not an error.
-	MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref, int maxCount);
+	// PACKED (Kind::Reflog). The reflog subject is already split into action + detail.
+	MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref, int maxCount,
+	                                          int* outLen);
 
 	// Frees any char* returned by the MsGit* functions above.
 	MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr);

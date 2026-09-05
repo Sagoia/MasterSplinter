@@ -49,7 +49,8 @@ namespace MasterSplinter.Entrypoint.Interop
                                               int maxCount, out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitRefDetails", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr MsGitRefDetails([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+        private static extern IntPtr MsGitRefDetails([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                     out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitCommitFiles", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitCommitFiles([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -58,7 +59,8 @@ namespace MasterSplinter.Entrypoint.Interop
 
         [DllImport(Dll, EntryPoint = "MsGitCommitShortStat", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitCommitShortStat([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
-                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string sha);
+                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
+                                                          out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFileDiff", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -81,7 +83,8 @@ namespace MasterSplinter.Entrypoint.Interop
         [DllImport(Dll, EntryPoint = "MsGitRangeShortStat", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitRangeShortStat([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
-                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string b);
+                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string b,
+                                                         out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitRangeFileDiff", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitRangeFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -264,7 +267,8 @@ namespace MasterSplinter.Entrypoint.Interop
         // ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------
 
         [DllImport(Dll, EntryPoint = "MsGitStashList", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr MsGitStashList([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+        private static extern IntPtr MsGitStashList([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                    out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitStashSave", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitStashSave([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -306,7 +310,8 @@ namespace MasterSplinter.Entrypoint.Interop
         [DllImport(Dll, EntryPoint = "MsGitReflog", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitReflog([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
-                                                 int maxCount);
+                                                 int maxCount,
+                                                 out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFree", CallingConvention = CallingConvention.Cdecl)]
         private static extern void MsGitFree(IntPtr ptr);
@@ -351,14 +356,23 @@ namespace MasterSplinter.Entrypoint.Interop
             IntPtr ptr = MsGitLog(root, order, maxCount, out int len);
             return PackedBuffer.Wrap(TakeBytes(ptr, len));
         }
-        public static string GitRefDetails(string root) => TakeString(MsGitRefDetails(root));
+        /// <summary>Branches, tags and remote-tracking refs, as a packed buffer.</summary>
+        public static PackedBuffer GitRefDetails(string root)
+        {
+            IntPtr ptr = MsGitRefDetails(root, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         /// <summary>Files changed in one commit, as a packed buffer.</summary>
         public static PackedBuffer GitCommitFiles(string root, string sha)
         {
             IntPtr ptr = MsGitCommitFiles(root, sha, out int len);
             return PackedBuffer.Wrap(TakeBytes(ptr, len));
         }
-        public static string GitCommitShortStat(string root, string sha) => TakeString(MsGitCommitShortStat(root, sha));
+        public static PackedBuffer GitCommitShortStat(string root, string sha)
+        {
+            IntPtr ptr = MsGitCommitShortStat(root, sha, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         /// <summary>Parsed unified diff for one file in a commit, as a packed buffer.</summary>
         public static PackedBuffer GitFileDiff(string root, string sha, string path, int wsMode)
         {
@@ -372,7 +386,11 @@ namespace MasterSplinter.Entrypoint.Interop
             IntPtr ptr = MsGitRangeFiles(root, a, b, out int len);
             return PackedBuffer.Wrap(TakeBytes(ptr, len));
         }
-        public static string GitRangeShortStat(string root, string a, string b) => TakeString(MsGitRangeShortStat(root, a, b));
+        public static PackedBuffer GitRangeShortStat(string root, string a, string b)
+        {
+            IntPtr ptr = MsGitRangeShortStat(root, a, b, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         /// <summary>Parsed unified diff for one file between two commits, as a packed buffer.</summary>
         public static PackedBuffer GitRangeFileDiff(string root, string a, string b, string path, int wsMode)
         {
@@ -412,7 +430,12 @@ namespace MasterSplinter.Entrypoint.Interop
 
         // ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------
 
-        public static string GitStashList(string root) => TakeString(MsGitStashList(root));
+        /// <summary>The stash, newest first, as a packed buffer.</summary>
+        public static PackedBuffer GitStashList(string root)
+        {
+            IntPtr ptr = MsGitStashList(root, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         public static string GitStashSave(string root, string message, bool includeUntracked, bool keepIndex)
             => TakeString(MsGitStashSave(root, message, includeUntracked, keepIndex));
         public static string GitStashApply(string root, string refName) => TakeString(MsGitStashApply(root, refName));
@@ -436,8 +459,12 @@ namespace MasterSplinter.Entrypoint.Interop
             return PackedBuffer.Wrap(TakeBytes(ptr, len));
         }
 
-        public static string GitReflog(string root, string refName, int maxCount)
-            => TakeString(MsGitReflog(root, refName, maxCount));
+        /// <summary>Where a ref has been, as a packed buffer.</summary>
+        public static PackedBuffer GitReflog(string root, string refName, int maxCount)
+        {
+            IntPtr ptr = MsGitReflog(root, refName, maxCount, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
 
         /// <summary>
         /// Wraps a managed progress handler as a native callback for the duration of one call.

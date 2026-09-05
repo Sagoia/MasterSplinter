@@ -337,6 +337,78 @@ public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
     }
 
     [Fact]
+    public void TheStashListParsesAgainstRealGit()
+    {
+        // D5 moved stash parsing into the native core and changed its git format (-z, the
+        // free-form %gs last, the offset off %aI). The shared fixture has no stash and adding one
+        // would disturb the dirty tree every other test reads, so this builds its own repository.
+        Assert.True(_repo.Usable, "scratch repo unavailable: " + _repo.SkipReason);
+
+        string dir = Path.Combine(Path.GetTempPath(), "ms-stash-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            void Run(string args)
+            {
+                var psi = new ProcessStartInfo("git", args)
+                {
+                    WorkingDirectory = dir,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                };
+                using Process p = Process.Start(psi) ?? throw new InvalidOperationException("git did not start");
+                p.WaitForExit();
+            }
+
+            Run("init -q -b main");
+            Run("config user.email test@example.com");
+            Run("config user.name \"Test User\"");
+            Run("config commit.gpgsign false");
+            File.WriteAllText(Path.Combine(dir, "f.txt"), "one\n");
+            Run("add f.txt");
+            Run("commit -q -m base");
+
+            // Two stashes: one with git's composed "WIP on <branch>" subject, one with a message
+            // the user supplied, so both halves of the subject split are exercised.
+            File.WriteAllText(Path.Combine(dir, "f.txt"), "two\n");
+            Run("stash push");
+            File.WriteAllText(Path.Combine(dir, "f.txt"), "three\n");
+            Run("stash push -m \"my own message\"");
+
+            GitRepository? git = GitRepository.Open(dir, out string? error);
+            Assert.Null(error);
+            Assert.NotNull(git);
+
+            IReadOnlyList<StashEntry> stashes = git!.ListStashes();
+            Assert.Equal(2, stashes.Count);
+
+            // Newest first, and the selectors are positional.
+            Assert.Equal("stash@{0}", stashes[0].Selector);
+            Assert.Equal("stash@{1}", stashes[1].Selector);
+            Assert.Equal(0, stashes[0].Index);
+            Assert.Equal(1, stashes[1].Index);
+
+            // The user-supplied message keeps its own text; git's composed one yields a branch.
+            Assert.Contains(stashes, e => e.Message == "my own message");
+            Assert.Contains(stashes, e => e.Branch == "main");
+
+            Assert.All(stashes, e => Assert.False(string.IsNullOrWhiteSpace(e.Sha)));
+            Assert.All(stashes, e => Assert.NotEqual(default, e.When));
+        }
+        finally
+        {
+            try
+            {
+                foreach (string f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                    File.SetAttributes(f, FileAttributes.Normal);
+                Directory.Delete(dir, recursive: true);
+            }
+            catch { /* a leftover temp dir is not worth failing a test run over */ }
+        }
+    }
+
+    [Fact]
     public void TheReflogIsReadable()
     {
         IReadOnlyList<ReflogEntry> entries = Open().Reflog("HEAD", 50);

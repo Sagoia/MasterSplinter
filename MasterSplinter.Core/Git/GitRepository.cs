@@ -74,12 +74,6 @@ namespace MasterSplinter.Entrypoint.Git
 
         internal static string Short(string hash) => hash.Length > 7 ? hash[..7] : hash;
 
-        private static DateTimeOffset ParseDate(string iso)
-            => DateTimeOffset.TryParse(iso, CultureInfo.InvariantCulture,
-                   DateTimeStyles.AssumeUniversal, out var d)
-                ? d
-                : DateTimeOffset.MinValue;
-
         /// <summary>
         /// Builds a timestamp from the unix seconds + signed minute offset the packed log and
         /// blame records carry. Lives here rather than in either area file because both use it —

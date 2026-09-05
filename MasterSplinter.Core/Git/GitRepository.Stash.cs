@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Text.RegularExpressions;
 using MasterSplinter.Entrypoint.Interop;
 using MasterSplinter.Entrypoint.Models;
 
@@ -9,6 +8,17 @@ namespace MasterSplinter.Entrypoint.Git
     public sealed partial class GitRepository
     {
         // ---- Stash (Phase 8, STASH-001..004) ---------------------------------------------------
+
+        // Record layout, mirroring Parse/RefParser.h.
+        private const int StashOffWhen = 0;
+        private const int StashOffTz = 8;
+        private const int StashOffIndex = 12;
+        private const int StashOffSelector = 16;
+        private const int StashOffSha = 24;
+        private const int StashOffShortSha = 32;
+        private const int StashOffMessage = 40;
+        private const int StashOffBranch = 48;
+        private const int StashOffAuthor = 56;
 
         /// <summary>
         /// The stash, newest first (STASH-001). Empty when there are no stashes AND on error —
@@ -20,36 +30,22 @@ namespace MasterSplinter.Entrypoint.Git
         /// </remarks>
         public IReadOnlyList<StashEntry> ListStashes()
         {
-            string raw = NativeLogic.GitStashList(RootPath);
-            var entries = new List<StashEntry>();
-            int index = 0;
-            foreach (string rec in raw.Split(RS))
+            // The subject arrives already split into branch + message by Parse/RefParser.cpp.
+            PackedBuffer buf = NativeLogic.GitStashList(RootPath);
+            var entries = new List<StashEntry>(buf.RecordCount);
+            for (int i = 0; i < buf.RecordCount; i++)
             {
-                string r = rec.Trim('\n', '\r');
-                if (r.Length == 0)
-                    continue;
-                string[] f = r.Split(US);
-                if (f.Length < 6)
-                    continue;
-
-                var (branch, message) = SplitStashSubject(f[3]);
-                entries.Add(new StashEntry(index++, f[0], f[1], f[2], message, branch,
-                                           ParseDate(f[4]), f[5]));
+                entries.Add(new StashEntry(
+                    buf.I32(i, StashOffIndex),
+                    buf.Str(i, StashOffSelector),
+                    buf.Str(i, StashOffSha),
+                    buf.Str(i, StashOffShortSha),
+                    buf.Str(i, StashOffMessage),
+                    buf.Str(i, StashOffBranch),
+                    FromUnixWithOffset(buf.I64(i, StashOffWhen), buf.I32(i, StashOffTz)),
+                    buf.Str(i, StashOffAuthor)));
             }
             return entries;
-        }
-
-        // git composes a stash's reflog subject as "WIP on <branch>: <sha> <subject>" (or
-        // "On <branch>: <text>" when the user supplied a message). Splitting it gives the sidebar a
-        // branch to show and a message that is not three-quarters boilerplate. Anything that does
-        // not match either shape is kept whole — a custom message is not worth mangling.
-        private static readonly Regex StashSubjectRe =
-            new(@"^(?:WIP on|On) ([^:]+): (.*)$", RegexOptions.Compiled | RegexOptions.Singleline);
-
-        internal static (string Branch, string Message) SplitStashSubject(string subject)
-        {
-            Match m = StashSubjectRe.Match(subject);
-            return m.Success ? (m.Groups[1].Value, m.Groups[2].Value) : ("", subject);
         }
 
         /// <summary>STASH-001. A blank message lets git compose its own "WIP on &lt;branch&gt;" text.

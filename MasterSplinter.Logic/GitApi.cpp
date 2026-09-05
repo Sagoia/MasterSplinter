@@ -242,9 +242,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, i
     return CallPacked(outLen, ms::packed::Kind::Log, &ms::GitBackend::Log, root, order, maxCount);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root, int* outLen)
 {
-    return CallRead(&ms::GitBackend::RefDetails, root);
+    return CallPacked(outLen, ms::packed::Kind::Refs, &ms::GitBackend::RefDetails, root);
 }
 
 // ---- Commit inspection ---------------------------------------------------------------------
@@ -254,9 +254,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, cons
     return CallPacked(outLen, ms::packed::Kind::NameStatus, &ms::GitBackend::CommitFiles, root, sha);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha, int* outLen)
 {
-    return CallRead(&ms::GitBackend::CommitShortStat, root, sha);
+    return CallPacked(outLen, ms::packed::Kind::ShortStat, &ms::GitBackend::CommitShortStat, root, sha);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path,
@@ -278,9 +278,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const
     return CallPacked(outLen, ms::packed::Kind::NameStatus, &ms::GitBackend::RangeFiles, root, a, b);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b, int* outLen)
 {
-    return CallRead(&ms::GitBackend::RangeShortStat, root, a, b);
+    return CallPacked(outLen, ms::packed::Kind::ShortStat, &ms::GitBackend::RangeShortStat, root, a, b);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
@@ -494,9 +494,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitRepositoryState(const char* root)
 
 // ---- Stash, blame, search, reflog (Phase 8) -------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root, int* outLen)
 {
-    return CallRead(&ms::GitBackend::StashList, root);
+    return CallPacked(outLen, ms::packed::Kind::Stash, &ms::GitBackend::StashList, root);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashSave(const char* root, const char* message,
@@ -538,11 +538,13 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitSearchLog(const char* root, const 
 }
 
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref,
-                                                     int maxCount)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* refName,
+                                                     int maxCount, int* outLen)
 {
-    return CallRead(&ms::GitBackend::Reflog, root, ref, maxCount);
+    return CallPacked(outLen, ms::packed::Kind::Reflog, &ms::GitBackend::Reflog,
+                      root, refName, maxCount);
 }
+
 
 extern "C" MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr)
 {

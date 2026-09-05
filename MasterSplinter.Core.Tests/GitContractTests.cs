@@ -97,24 +97,4 @@ public class GitContractTests
         Assert.Equal(once, GitRepository.NormalizeMessage(once));
     }
 
-    // ---- Stash subjects ------------------------------------------------------------------------
-
-    [Theory]
-    [InlineData("WIP on main: 1a2b3c4 tidy up", "main", "1a2b3c4 tidy up")]
-    [InlineData("On feature/x: my message", "feature/x", "my message")]
-    public void StashSubjectSplitsIntoBranchAndMessage(string subject, string branch, string message)
-    {
-        var (b, m) = GitRepository.SplitStashSubject(subject);
-        Assert.Equal(branch, b);
-        Assert.Equal(message, m);
-    }
-
-    [Fact]
-    public void UnrecognisedStashSubjectIsKeptWhole()
-    {
-        var (branch, message) = GitRepository.SplitStashSubject("something else entirely");
-        Assert.Equal("", branch);
-        Assert.Equal("something else entirely", message);
-    }
-
 }

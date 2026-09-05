@@ -31,11 +31,12 @@ namespace ms
     std::string GitBackend::CommitShortStat(const std::string& root, const std::string& sha) const
     {
         if (root.empty() || sha.empty())
-            return std::string();
-        return RunRaw(root, GitArgs{ "diff-tree", "--shortstat", "-M", "--first-parent",
-                                     "--root", "--no-commit-id" }
-            .FirstParentMerges()
-            .Add(sha));
+            return parse::ParseShortStat("");
+        return parse::ParseShortStat(
+            RunRaw(root, GitArgs{ "diff-tree", "--shortstat", "-M", "--first-parent",
+                                  "--root", "--no-commit-id" }
+                .FirstParentMerges()
+                .Add(sha)));
     }
 
     std::string GitBackend::FileDiff(const std::string& root, const std::string& sha,
@@ -78,8 +79,9 @@ namespace ms
     std::string GitBackend::RangeShortStat(const std::string& root, const std::string& a, const std::string& b) const
     {
         if (root.empty() || a.empty() || b.empty())
-            return std::string();
-        return RunRaw(root, GitArgs{ "diff", "--shortstat", "-M" }.Add(a).Add(b));
+            return parse::ParseShortStat("");
+        return parse::ParseShortStat(
+            RunRaw(root, GitArgs{ "diff", "--shortstat", "-M" }.Add(a).Add(b)));
     }
 
     std::string GitBackend::RangeFileDiff(const std::string& root, const std::string& a, const std::string& b,

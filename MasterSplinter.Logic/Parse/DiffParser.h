@@ -50,4 +50,21 @@ namespace ms::parse
     // Never fails: unparseable input yields an empty record set, which the host renders as an
     // empty diff pane rather than an error.
     std::string ParseUnifiedDiff(std::string_view raw);
+
+    // ---- --shortstat -----------------------------------------------------------------------------
+
+    // Record layout for a diff summary. Exactly one record, 12 bytes.
+    //
+    //    0  i32 files
+    //    4  i32 insertions
+    //    8  i32 deletions
+    inline constexpr std::uint32_t kShortStatRecordSize = 12;
+    inline constexpr std::uint32_t kShortStatOffFiles = 0;
+    inline constexpr std::uint32_t kShortStatOffInsertions = 4;
+    inline constexpr std::uint32_t kShortStatOffDeletions = 8;
+
+    // " 3 files changed, 12 insertions(+), 4 deletions(-)" -- each clause is optional, and a
+    // missing one counts as zero. Yields Kind::ShortStat with a single record, always: an
+    // all-zero stat is what an empty diff means, not an error.
+    std::string ParseShortStat(std::string_view raw);
 }

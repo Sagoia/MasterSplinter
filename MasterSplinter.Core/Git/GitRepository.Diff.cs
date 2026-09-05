@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Text.RegularExpressions;
 using MasterSplinter.Entrypoint.Interop;
 using MasterSplinter.Entrypoint.Models;
 
@@ -51,22 +50,20 @@ namespace MasterSplinter.Entrypoint.Git
 
         // ---- Diff summary stats (DIFF-001) -----------------------------------------------------
 
-        public DiffStat CommitStat(string sha) => ParseShortStat(NativeLogic.GitCommitShortStat(RootPath, sha));
-        public DiffStat RangeStat(string a, string b) => ParseShortStat(NativeLogic.GitRangeShortStat(RootPath, a, b));
+        // Record layout, mirroring Parse/DiffParser.h. Always exactly one record.
+        private const int ShortStatOffFiles = 0;
+        private const int ShortStatOffInsertions = 4;
+        private const int ShortStatOffDeletions = 8;
 
-        // " 3 files changed, 12 insertions(+), 4 deletions(-)" — each clause is optional.
-        private static readonly Regex FilesRe = new(@"(\d+)\s+files?\s+changed", RegexOptions.Compiled);
-        private static readonly Regex InsertRe = new(@"(\d+)\s+insertions?\(\+\)", RegexOptions.Compiled);
-        private static readonly Regex DeleteRe = new(@"(\d+)\s+deletions?\(-\)", RegexOptions.Compiled);
+        public DiffStat CommitStat(string sha) => ReadStat(NativeLogic.GitCommitShortStat(RootPath, sha));
+        public DiffStat RangeStat(string a, string b) => ReadStat(NativeLogic.GitRangeShortStat(RootPath, a, b));
 
-        internal static DiffStat ParseShortStat(string raw)
-            => new(MatchInt(FilesRe, raw), MatchInt(InsertRe, raw), MatchInt(DeleteRe, raw));
-
-        private static int MatchInt(Regex re, string s)
-        {
-            Match m = re.Match(s);
-            return m.Success ? int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) : 0;
-        }
+        internal static DiffStat ReadStat(PackedBuffer buf)
+            => buf.RecordCount == 0
+                ? default
+                : new DiffStat(buf.I32(0, ShortStatOffFiles),
+                               buf.I32(0, ShortStatOffInsertions),
+                               buf.I32(0, ShortStatOffDeletions));
 
         // ---- Diff for one file (single commit or a..b range) -----------------------------------
 

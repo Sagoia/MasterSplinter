@@ -7,6 +7,7 @@
 #include "Parse/BlameParser.h"
 #include "Parse/DiffParser.h"
 #include "Parse/LogParser.h"
+#include "Parse/RefParser.h"
 
 // Parsers migrated from the host during Phase D. Each suite here replaces an xunit file that was
 // deleted in the same commit, so the coverage moved rather than shrank.
@@ -583,4 +584,125 @@ TEST(SplitMessage, AnEmptyMessageYieldsNothing)
     pr::SplitMessage("\n\n\n", subject, body);
     EXPECT_EQ(subject, "");
     EXPECT_EQ(body, "");
+}
+
+// ---- --shortstat (was the shortstat half of RecordParserTests.cs) -------------------------------
+
+namespace
+{
+    ms::packed::Kind StatKind(const PackedRead& p) { return p.Kind(); }
+
+    PackedRead Stat(std::string_view raw) { return PackedRead(pr::ParseShortStat(raw)); }
+}
+
+TEST(ShortStat, ReadsAllThreeNumbers)
+{
+    const PackedRead p = Stat(" 3 files changed, 12 insertions(+), 4 deletions(-)");
+
+    EXPECT_EQ(StatKind(p), ms::packed::Kind::ShortStat);
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffFiles), 3);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffInsertions), 12);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffDeletions), 4);
+}
+
+TEST(ShortStat, HandlesTheSingularForms)
+{
+    const PackedRead p = Stat(" 1 file changed, 1 insertion(+), 1 deletion(-)");
+
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffFiles), 1);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffInsertions), 1);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffDeletions), 1);
+}
+
+TEST(ShortStat, TreatsAMissingClauseAsZero)
+{
+    const PackedRead p = Stat(" 2 files changed, 7 insertions(+)");
+
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffFiles), 2);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffInsertions), 7);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffDeletions), 0);
+}
+
+TEST(ShortStat, EmptyInputIsAllZeroButStillOneRecord)
+{
+    // An empty diff is a zero stat, not a failure -- so there is always exactly one record.
+    const PackedRead p = Stat("");
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffFiles), 0);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffInsertions), 0);
+    EXPECT_EQ(p.RecI32(0, pr::kShortStatOffDeletions), 0);
+}
+
+// ---- Stash subjects (was GitContractTests.cs) ---------------------------------------------------
+
+TEST(StashSubject, WipFormIsSplitIntoBranchAndMessage)
+{
+    std::string branch, message;
+    pr::SplitStashSubject("WIP on main: abc1234 some commit", branch, message);
+    EXPECT_EQ(branch, "main");
+    EXPECT_EQ(message, "abc1234 some commit");
+}
+
+TEST(StashSubject, OnFormIsSplitToo)
+{
+    std::string branch, message;
+    pr::SplitStashSubject("On feature/x: my message", branch, message);
+    EXPECT_EQ(branch, "feature/x");
+    EXPECT_EQ(message, "my message");
+}
+
+TEST(StashSubject, UnrecognisedSubjectsAreKeptWhole)
+{
+    // A custom message is not worth mangling.
+    std::string branch, message;
+    pr::SplitStashSubject("something else entirely", branch, message);
+    EXPECT_EQ(branch, "");
+    EXPECT_EQ(message, "something else entirely");
+
+    pr::SplitStashSubject("WIP on main", branch, message);   // no colon
+    EXPECT_EQ(branch, "");
+    EXPECT_EQ(message, "WIP on main");
+
+    pr::SplitStashSubject("", branch, message);
+    EXPECT_EQ(branch, "");
+    EXPECT_EQ(message, "");
+}
+
+// ---- Upstream tracking and ISO offsets ----------------------------------------------------------
+
+TEST(Track, AheadAndBehindAreReadIndependently)
+{
+    std::int32_t ahead = 0, behind = 0;
+
+    pr::ParseTrack("ahead 2, behind 1", ahead, behind);
+    EXPECT_EQ(ahead, 2);
+    EXPECT_EQ(behind, 1);
+
+    pr::ParseTrack("ahead 5", ahead, behind);
+    EXPECT_EQ(ahead, 5);
+    EXPECT_EQ(behind, 0);
+
+    pr::ParseTrack("behind 3", ahead, behind);
+    EXPECT_EQ(ahead, 0);
+    EXPECT_EQ(behind, 3);
+
+    // "gone" and "" leave both at zero, so a branch shows no arrows rather than a wrong number.
+    pr::ParseTrack("gone", ahead, behind);
+    EXPECT_EQ(ahead, 0);
+    EXPECT_EQ(behind, 0);
+    pr::ParseTrack("", ahead, behind);
+    EXPECT_EQ(ahead, 0);
+    EXPECT_EQ(behind, 0);
+}
+
+TEST(IsoOffset, TheTrailingOffsetIsReadAsSignedMinutes)
+{
+    EXPECT_EQ(pr::ParseIsoOffsetMinutes("2026-08-15T10:00:00+02:00"), 2 * 60);
+    EXPECT_EQ(pr::ParseIsoOffsetMinutes("2026-08-15T10:00:00-07:30"), -(7 * 60 + 30));
+    EXPECT_EQ(pr::ParseIsoOffsetMinutes("2026-08-15T10:00:00+0200"), 2 * 60);
+    EXPECT_EQ(pr::ParseIsoOffsetMinutes("2026-08-15T10:00:00Z"), 0);
+    EXPECT_EQ(pr::ParseIsoOffsetMinutes(""), 0);
+    // A date is full of hyphens; only the trailing offset counts.
+    EXPECT_EQ(pr::ParseIsoOffsetMinutes("2026-08-15"), 0);
 }

@@ -97,66 +97,64 @@ namespace MasterSplinter.Entrypoint.Git
         public sealed record RefList(List<BranchInfo> Branches, List<TagInfo> Tags,
                                      List<RemoteBranchInfo> Remotes);
 
-        // "ahead 2, behind 1" from %(upstream:track,nobracket). Anything unrecognized leaves the
-        // counts at 0 — a branch then simply shows no arrows, never a wrong number.
-        private static readonly Regex AheadRe = new(@"ahead (\d+)", RegexOptions.Compiled);
-        private static readonly Regex BehindRe = new(@"behind (\d+)", RegexOptions.Compiled);
+        // Record layout, mirroring Parse/RefParser.h.
+        private const int RefOffKind = 0;
+        private const int RefOffIsCurrent = 1;
+        private const int RefOffUpstreamGone = 2;
+        private const int RefOffIsAnnotated = 3;
+        private const int RefOffAhead = 4;
+        private const int RefOffBehind = 8;
+        private const int RefOffRefName = 12;
+        private const int RefOffName = 20;
+        private const int RefOffSha = 28;
+        private const int RefOffUpstream = 36;
+        private const int RefOffRemote = 44;
+
+        private const byte RefKindBranch = 0;
+        private const byte RefKindTag = 1;
+        private const byte RefKindRemoteBranch = 2;
 
         /// <summary>Local branches, tags and remote-tracking branches in one pass (BR-001, BR-002,
-        /// TAG-001). See MasterSplinter.Logic.h for the 8-field record layout.</summary>
+        /// TAG-001). Parsing lives in Parse/RefParser.cpp; each record is tagged with its kind, so
+        /// this is bucketing rather than prefix-testing.</summary>
         public RefList ListRefs()
         {
-            string raw = NativeLogic.GitRefDetails(RootPath);
+            PackedBuffer buf = NativeLogic.GitRefDetails(RootPath);
             var branches = new List<BranchInfo>();
             var tags = new List<TagInfo>();
             var remotes = new List<RemoteBranchInfo>();
 
-            foreach (string rec in raw.Split(RS))
+            for (int i = 0; i < buf.RecordCount; i++)
             {
-                // git writes a newline after each record's RS terminator.
-                string r = rec.Trim('\n', '\r');
-                if (r.Length == 0)
-                    continue;
-                string[] f = r.Split(US);
-                if (f.Length < 8)
-                    continue;
+                switch (buf.U8(i, RefOffKind))
+                {
+                    case RefKindBranch:
+                        branches.Add(new BranchInfo(
+                            buf.Str(i, RefOffRefName),
+                            buf.Str(i, RefOffName),
+                            buf.Str(i, RefOffSha),
+                            buf.Str(i, RefOffUpstream),
+                            buf.I32(i, RefOffAhead),
+                            buf.I32(i, RefOffBehind),
+                            buf.U8(i, RefOffUpstreamGone) != 0,
+                            buf.U8(i, RefOffIsCurrent) != 0));
+                        break;
 
-                string refName = f[0];
-                if (refName.StartsWith("refs/heads/", StringComparison.Ordinal))
-                {
-                    string track = f[5];
-                    branches.Add(new BranchInfo(
-                        refName,
-                        refName["refs/heads/".Length..],
-                        f[1],
-                        f[4],
-                        MatchInt(AheadRe, track),
-                        MatchInt(BehindRe, track),
-                        track == "gone",
-                        f[6].Trim() == "*"));
-                }
-                else if (refName.StartsWith("refs/tags/", StringComparison.Ordinal))
-                {
-                    // %(objectname) is the tag OBJECT for an annotated tag; %(*objectname) peels
-                    // it to the commit, which is what compare/checkout need.
-                    tags.Add(new TagInfo(
-                        refName,
-                        refName["refs/tags/".Length..],
-                        f[2].Length > 0 ? f[2] : f[1],
-                        f[3] == "tag"));
-                }
-                else if (refName.StartsWith("refs/remotes/", StringComparison.Ordinal))
-                {
-                    // Skip symbolic refs: refs/remotes/origin/HEAD is an alias for another branch
-                    // and would otherwise render as a phantom "HEAD" leaf under the remote.
-                    if (f[7].Length > 0)
-                        continue;
-                    string shortName = refName["refs/remotes/".Length..];
-                    int slash = shortName.IndexOf('/');
-                    if (slash < 0)
-                        continue;
-                    remotes.Add(new RemoteBranchInfo(refName, shortName[..slash],
-                                                     shortName[(slash + 1)..], f[1]));
+                    case RefKindTag:
+                        tags.Add(new TagInfo(
+                            buf.Str(i, RefOffRefName),
+                            buf.Str(i, RefOffName),
+                            buf.Str(i, RefOffSha),
+                            buf.U8(i, RefOffIsAnnotated) != 0));
+                        break;
+
+                    case RefKindRemoteBranch:
+                        remotes.Add(new RemoteBranchInfo(
+                            buf.Str(i, RefOffRefName),
+                            buf.Str(i, RefOffRemote),
+                            buf.Str(i, RefOffName),
+                            buf.Str(i, RefOffSha)));
+                        break;
                 }
             }
             return new RefList(branches, tags, remotes);
@@ -200,29 +198,35 @@ namespace MasterSplinter.Entrypoint.Git
         /// Where a ref has been (REFLOG-001); empty <paramref name="refName"/> means HEAD. Empty
         /// when the ref has no reflog at all, which is an ordinary state rather than an error.
         /// </summary>
+        // Record layout, mirroring Parse/RefParser.h.
+        private const int ReflogOffWhen = 0;
+        private const int ReflogOffTz = 8;
+        private const int ReflogOffIndex = 12;
+        private const int ReflogOffSelector = 16;
+        private const int ReflogOffSha = 24;
+        private const int ReflogOffShortSha = 32;
+        private const int ReflogOffAction = 40;
+        private const int ReflogOffDetail = 48;
+        private const int ReflogOffSubject = 56;
+        private const int ReflogOffAuthor = 64;
+
         public IReadOnlyList<ReflogEntry> Reflog(string refName, int maxCount)
         {
-            string raw = NativeLogic.GitReflog(RootPath, refName, maxCount);
-            var entries = new List<ReflogEntry>();
-            int index = 0;
-            foreach (string rec in raw.Split(RS))
+            // The reflog subject arrives already split into action + detail.
+            PackedBuffer buf = NativeLogic.GitReflog(RootPath, refName, maxCount);
+            var entries = new List<ReflogEntry>(buf.RecordCount);
+            for (int i = 0; i < buf.RecordCount; i++)
             {
-                string r = rec.Trim('\n', '\r');
-                if (r.Length == 0)
-                    continue;
-                string[] f = r.Split(US);
-                if (f.Length < 7)
-                    continue;
-
-                // git packs the operation and its argument into one subject:
-                // "checkout: moving from main to feature" -> ("checkout", "moving from ...").
-                string subject = f[3];
-                int colon = subject.IndexOf(": ", StringComparison.Ordinal);
-                string action = colon > 0 ? subject[..colon] : subject;
-                string detail = colon > 0 ? subject[(colon + 2)..] : "";
-
-                entries.Add(new ReflogEntry(index++, f[0], f[1], f[2], action, detail, f[6],
-                                            ParseDate(f[4]), f[5]));
+                entries.Add(new ReflogEntry(
+                    buf.I32(i, ReflogOffIndex),
+                    buf.Str(i, ReflogOffSelector),
+                    buf.Str(i, ReflogOffSha),
+                    buf.Str(i, ReflogOffShortSha),
+                    buf.Str(i, ReflogOffAction),
+                    buf.Str(i, ReflogOffDetail),
+                    buf.Str(i, ReflogOffSubject),
+                    FromUnixWithOffset(buf.I64(i, ReflogOffWhen), buf.I32(i, ReflogOffTz)),
+                    buf.Str(i, ReflogOffAuthor)));
             }
             return entries;
         }

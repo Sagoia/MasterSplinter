@@ -192,4 +192,40 @@ namespace ms::parse
 
         return w.Finish();
     }
+
+    std::string ParseShortStat(std::string_view raw)
+    {
+        // Hand-scanned rather than run through three compiled regexes: each clause is
+        // "<number> <word>", so finding the word and reading the digits before it is the whole
+        // job. Singular and plural both match because the search key stops before the "s".
+        auto before = [&](std::string_view label) -> std::int32_t
+        {
+            const std::size_t at = raw.find(label);
+            if (at == std::string_view::npos)
+                return 0;
+
+            // Walk back over the space, then over the digits.
+            std::size_t end = at;
+            while (end > 0 && raw[end - 1] == ' ')
+                --end;
+            std::size_t begin = end;
+            while (begin > 0 && IsDigit(raw[begin - 1]))
+                --begin;
+            if (begin == end)
+                return 0;
+
+            std::size_t i = begin;
+            std::int32_t value = 0;
+            ReadNumber(raw, i, value);
+            return value;
+        };
+
+        PackedWriter w(packed::Kind::ShortStat, kShortStatRecordSize);
+        w.BeginRecord();
+        w.PutI32(before("file"));
+        w.PutI32(before("insertion"));
+        w.PutI32(before("deletion"));
+        w.EndRecord();
+        return w.Finish();
+    }
 }

@@ -199,6 +199,9 @@
     <ClCompile Include="..\MasterSplinter.Logic\Parse\LogParser.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Parse\RefParser.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\MasterSplinter.Logic\Parse\StatusParser.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
