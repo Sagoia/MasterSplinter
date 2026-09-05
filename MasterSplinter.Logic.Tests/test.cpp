@@ -28,9 +28,15 @@ namespace
     // 0x1E record separator (used by the for-each-ref payloads below).
     const std::string RS = std::string(1, '\x1e');
 
-    // Must match the pretty-format string in GitBackend::Log exactly.
+    // Must match the pretty-format string in GitLogFormat.h exactly, and must be preceded by the
+    // other two flags AddLogRecordFlags emits. All three are pinned because dropping any one is
+    // silently wrong rather than loudly broken: without -z a 0x1E in a commit body splits the
+    // record, without %B a 0x1F in a subject shifts every later field, and without the date
+    // format every timestamp reads as 1970.
+    const std::string ZFLAG = "-z";
+    const std::string DATEFMT = "--date=format:%z";
     const std::string FMT =
-        "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%s%x1f%b%x1e";
+        "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%ad%x1f%cn%x1f%ce%x1f%ct%x1f%cd%x1f%D%x1f%B";
 
     // Must match the format string in GitBackend::RefDetails exactly. Pinned here because
     // for-each-ref uses "%xx" hex escapes, not log --pretty's "%xNN" — writing %x1f would emit
@@ -198,7 +204,8 @@ TEST(Log, DateOrderWithLimitBuildsExactArgs)
     h.fake->SetResponse("", 0);
     h.backend->Log("root", 0, 100);
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "log", "--all", "--parents", "--date-order", "-n100", FMT }));
+              (Args{ "-C", "root", "log", "--all", "--parents", "--date-order", "-n100",
+                     ZFLAG, DATEFMT, FMT }));
 }
 
 TEST(Log, TopoOrderHasNoReverse)
@@ -237,10 +244,14 @@ TEST(Log, MaxCountZeroOmitsLimit)
     EXPECT_EQ(h.fake->ArgsOf(0).back(), FMT);
 }
 
-TEST(Log, EmptyRootReturnsEmptyWithoutCallingGit)
+TEST(Log, EmptyRootReturnsNoRecordsWithoutCallingGit)
 {
+    // A well-formed but empty packed buffer, not an empty string: every exit from a packed read
+    // is a buffer the host can read uniformly.
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->Log("", 0, 100), "");
+    const mstest::PackedRead p(h.backend->Log("", 0, 100));
+    EXPECT_EQ(p.Count(), 0u);
+    EXPECT_FALSE(p.IsError());
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
@@ -2017,7 +2028,8 @@ TEST(SearchLog, MessageModeUsesGrepAndTheSameFormatAsLog)
     // drift between the two would silently mis-map fields into the wrong columns.
     EXPECT_EQ(h.fake->ArgsOf(0),
               (Args{ "-C", "root", "log", "--parents", "--date-order", "-n50",
-                     "--fixed-strings", "--grep=needle", "--regexp-ignore-case", FMT, "--" }));
+                     "--fixed-strings", "--grep=needle", "--regexp-ignore-case",
+                     ZFLAG, DATEFMT, FMT, "--" }));
 }
 
 TEST(SearchLog, RegexAndCaseAndAllBranchesAreOptIn)
@@ -2047,7 +2059,7 @@ TEST(SearchLog, AuthorContentAndPathModesEachUseOnePredicate)
     EXPECT_TRUE(h.fake->ArgsContain(2, "-Gmall.c"));
     // Path mode has no text predicate at all — the query IS the pathspec (SEARCH-002).
     EXPECT_EQ(h.fake->ArgsOf(3),
-              (Args{ "-C", "root", "log", "--parents", "--date-order", "-n10", FMT,
+              (Args{ "-C", "root", "log", "--parents", "--date-order", "-n10", ZFLAG, DATEFMT, FMT,
                      "--", "src/a.cpp" }));
 }
 
@@ -2073,7 +2085,7 @@ TEST(SearchLog, HashModeVerifiesTheRevisionBeforeWalking)
               (Args{ "-C", "root", "rev-parse", "--verify", "--quiet", "abc123^{commit}" }));
     // The resolved sha is what the walk gets, not the user's abbreviation.
     EXPECT_EQ(h.fake->ArgsOf(1),
-              (Args{ "-C", "root", "log", "--parents", "-n1", FMT, "abc123def" }));
+              (Args{ "-C", "root", "log", "--parents", "-n1", ZFLAG, DATEFMT, FMT, "abc123def" }));
 }
 
 TEST(SearchLog, HashModeYieldsEmptyForAnUnknownRevision)
@@ -2081,7 +2093,9 @@ TEST(SearchLog, HashModeYieldsEmptyForAnUnknownRevision)
     auto h = MakeHarness();
     h.fake->AddResponse("", 1);
     // A typo must come back as "no results", never as git's error text rendered into the list.
-    EXPECT_EQ(h.backend->SearchLog("root", "hash", "nope", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(mstest::PackedRead(
+                  h.backend->SearchLog("root", "hash", "nope", "", 0, 10, true, false, false)).Count(),
+              0u);
     EXPECT_EQ(h.fake->CallCount(), 1u); // no log walk after a failed probe
 }
 
@@ -2096,12 +2110,14 @@ TEST(SearchLog, RejectedPatternReadsAsNoResults)
 TEST(SearchLog, EmptyWithoutSpawningGitWhenThereIsNothingToSearchFor)
 {
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->SearchLog("", "message", "x", "", 0, 10, true, false, false), "");
-    EXPECT_EQ(h.backend->SearchLog("root", "subject", "x", "", 0, 10, true, false, false), "");
+    auto rows = [&](const std::string& packed) { return mstest::PackedRead(packed).Count(); };
+
+    EXPECT_EQ(rows(h.backend->SearchLog("", "message", "x", "", 0, 10, true, false, false)), 0u);
+    EXPECT_EQ(rows(h.backend->SearchLog("root", "subject", "x", "", 0, 10, true, false, false)), 0u);
     // An unfiltered walk here would look like a search that happened to match everything.
-    EXPECT_EQ(h.backend->SearchLog("root", "message", "  ", "", 0, 10, true, false, false), "");
-    EXPECT_EQ(h.backend->SearchLog("root", "hash", "", "", 0, 10, true, false, false), "");
-    EXPECT_EQ(h.backend->SearchLog("root", "hash", "-rf", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(rows(h.backend->SearchLog("root", "message", "  ", "", 0, 10, true, false, false)), 0u);
+    EXPECT_EQ(rows(h.backend->SearchLog("root", "hash", "", "", 0, 10, true, false, false)), 0u);
+    EXPECT_EQ(rows(h.backend->SearchLog("root", "hash", "-rf", "", 0, 10, true, false, false)), 0u);
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
@@ -2143,7 +2159,7 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
 {
     ms::GitBackend backend(nullptr);
     EXPECT_FALSE(backend.IsRepository("root"));
-    EXPECT_EQ(backend.Log("root", 0, 10), "");
+    EXPECT_EQ(mstest::PackedRead(backend.Log("root", 0, 10)).Count(), 0u);
     EXPECT_FALSE(backend.FileBytesAt("root", "sha", "f").has_value());
     EXPECT_EQ(backend.StagePaths("root", { "a" }), "ERR" + US + "git add failed");
     EXPECT_EQ(backend.StageAll("root"), "ERR" + US + "git add failed");
@@ -2184,6 +2200,8 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
     EXPECT_EQ(backend.StashDrop("root", ""), "ERR" + US + "git stash drop failed");
     EXPECT_EQ(mstest::PackedRead(backend.Blame("root", "HEAD", "a", false, "")).Error(),
               "git blame failed");
-    EXPECT_EQ(backend.SearchLog("root", "message", "x", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(mstest::PackedRead(
+                  backend.SearchLog("root", "message", "x", "", 0, 10, true, false, false)).Count(),
+              0u);
     EXPECT_EQ(backend.Reflog("root", "HEAD", 10), "");
 }

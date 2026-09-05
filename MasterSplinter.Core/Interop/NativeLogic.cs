@@ -45,7 +45,8 @@ namespace MasterSplinter.Entrypoint.Interop
         private static extern IntPtr MsGitOpenRepository([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
 
         [DllImport(Dll, EntryPoint = "MsGitLog", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr MsGitLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root, int order, int maxCount);
+        private static extern IntPtr MsGitLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root, int order,
+                                              int maxCount, out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitRefDetails", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitRefDetails([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
@@ -296,7 +297,8 @@ namespace MasterSplinter.Entrypoint.Interop
                                                     int order, int maxCount,
                                                     [MarshalAs(UnmanagedType.I1)] bool matchCase,
                                                     [MarshalAs(UnmanagedType.I1)] bool useRegex,
-                                                    [MarshalAs(UnmanagedType.I1)] bool allBranches);
+                                                    [MarshalAs(UnmanagedType.I1)] bool allBranches,
+                                                    out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitReflog", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitReflog([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -340,7 +342,12 @@ namespace MasterSplinter.Entrypoint.Interop
         }
 
         public static string GitOpenRepository(string path) => TakeString(MsGitOpenRepository(path));
-        public static string GitLog(string root, int order, int maxCount) => TakeString(MsGitLog(root, order, maxCount));
+        /// <summary>Parsed commit records as a packed buffer.</summary>
+        public static PackedBuffer GitLog(string root, int order, int maxCount)
+        {
+            IntPtr ptr = MsGitLog(root, order, maxCount, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         public static string GitRefDetails(string root) => TakeString(MsGitRefDetails(root));
         public static string GitCommitFiles(string root, string sha) => TakeString(MsGitCommitFiles(root, sha));
         public static string GitCommitShortStat(string root, string sha) => TakeString(MsGitCommitShortStat(root, sha));
@@ -401,9 +408,16 @@ namespace MasterSplinter.Entrypoint.Interop
             return PackedBuffer.Wrap(TakeBytes(ptr, len));
         }
 
-        public static string GitSearchLog(string root, string mode, string query, string pathFilter,
-                                          int order, int maxCount, bool matchCase, bool useRegex, bool allBranches)
-            => TakeString(MsGitSearchLog(root, mode, query, pathFilter, order, maxCount, matchCase, useRegex, allBranches));
+        /// <summary>Search results as a packed buffer, byte-identical in shape to GitLog.</summary>
+        public static PackedBuffer GitSearchLog(string root, string mode, string query, string pathFilter,
+                                                int order, int maxCount, bool matchCase, bool useRegex,
+                                                bool allBranches)
+        {
+            IntPtr ptr = MsGitSearchLog(root, mode, query, pathFilter, order, maxCount, matchCase,
+                                        useRegex, allBranches, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+
         public static string GitReflog(string root, string refName, int maxCount)
             => TakeString(MsGitReflog(root, refName, maxCount));
 

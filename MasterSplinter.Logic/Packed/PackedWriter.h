@@ -35,6 +35,10 @@ namespace ms::packed
         // is padded to 4 first so the host can read the pairs without an unaligned load.
         ArrayRef AddStringRefs(const std::vector<StringRef>& refs);
 
+        // Interns an array of tagged strings (a commit's ref decorations and their badge kinds)
+        // as 12 bytes each. Padded to 4 first, like AddStringRefs.
+        ArrayRef AddTaggedRefs(const std::vector<TaggedRef>& items);
+
         // ---- Records ---------------------------------------------------------------------------
 
         void BeginRecord();

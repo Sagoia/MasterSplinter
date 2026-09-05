@@ -86,20 +86,5 @@ namespace MasterSplinter.Entrypoint.Git
             return lines;
         }
 
-        private static DateTimeOffset FromUnixWithOffset(long unixSeconds, int offsetMinutes)
-        {
-            if (unixSeconds <= 0)
-                return DateTimeOffset.MinValue;
-            try
-            {
-                return DateTimeOffset.FromUnixTimeSeconds(unixSeconds)
-                                     .ToOffset(TimeSpan.FromMinutes(offsetMinutes));
-            }
-            catch (ArgumentOutOfRangeException)
-            {
-                // A corrupt author-time or a >14h offset must cost one line's timestamp, not the file.
-                return DateTimeOffset.MinValue;
-            }
-        }
     }
 }

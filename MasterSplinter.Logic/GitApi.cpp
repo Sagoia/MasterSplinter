@@ -236,9 +236,10 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitOpenRepository(const char* path)
 
 // ---- History -------------------------------------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount,
+                                                  int* outLen)
 {
-    return CallRead(&ms::GitBackend::Log, root, order, maxCount);
+    return CallPacked(outLen, ms::packed::Kind::Log, &ms::GitBackend::Log, root, order, maxCount);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root)
@@ -529,11 +530,12 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitBlame(const char* root, const char
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitSearchLog(const char* root, const char* mode,
                                                         const char* query, const char* pathFilter,
                                                         int order, int maxCount, bool matchCase,
-                                                        bool useRegex, bool allBranches)
+                                                        bool useRegex, bool allBranches, int* outLen)
 {
-    return CallRead(&ms::GitBackend::SearchLog, root, mode, query, pathFilter,
-                    order, maxCount, matchCase, useRegex, allBranches);
+    return CallPacked(outLen, ms::packed::Kind::Log, &ms::GitBackend::SearchLog, root, mode, query,
+                      pathFilter, order, maxCount, matchCase, useRegex, allBranches);
 }
+
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref,
                                                      int maxCount)

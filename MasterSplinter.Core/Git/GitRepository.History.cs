@@ -14,7 +14,7 @@ namespace MasterSplinter.Entrypoint.Git
         // ---- Commit history --------------------------------------------------------------------
 
         public IReadOnlyList<CommitRow> Log(int order, int maxCount)
-            => WithGraph(ParseCommitRecords(NativeLogic.GitLog(RootPath, order, maxCount)));
+            => WithGraph(ReadLog(NativeLogic.GitLog(RootPath, order, maxCount)));
 
         /// <summary>Lays the branch graph out over a freshly parsed list. Shared by Log and
         /// SearchLog, which produce byte-identical records and so want identical treatment.</summary>
@@ -24,90 +24,72 @@ namespace MasterSplinter.Entrypoint.Git
             return commits;
         }
 
-        /// <summary>The 12-field commit record layout, shared by <see cref="Log"/> and
-        /// <see cref="SearchLog"/> — the native side emits one format string for both, so this is
-        /// the one place that knows the field order.</summary>
-        internal static List<CommitRow> ParseCommitRecords(string raw)
+        // ---- Reading a packed log ----------------------------------------------------------
+        //
+        // Record parsing lives in the native core now (Parse/LogParser.{h,cpp}); the layout below
+        // mirrors LogParser.h. The two tables ARE the contract, which is why both sides spell the
+        // offsets out rather than sharing a generated struct.
+
+        private const int LogOffAuthorTime = 0;
+        private const int LogOffCommitTime = 8;
+        private const int LogOffAuthorTz = 16;
+        private const int LogOffCommitTz = 20;
+        private const int LogOffFullHash = 24;
+        private const int LogOffShortHash = 32;
+        private const int LogOffParents = 40;
+        private const int LogOffAuthorName = 48;
+        private const int LogOffAuthorEmail = 56;
+        private const int LogOffCommitterName = 64;
+        private const int LogOffCommitterEmail = 72;
+        private const int LogOffBadges = 80;
+        private const int LogOffSubject = 88;
+        private const int LogOffBody = 96;
+
+        /// <summary>
+        /// Materialises packed commit records into rows.
+        /// <para>
+        /// The graph is NOT assigned here. Lane layout is cross-row by nature — where a commit
+        /// sits depends on its children — so it belongs to the whole list, not to one record.
+        /// See <see cref="CommitGraph"/>.
+        /// </para>
+        /// </summary>
+        internal static List<CommitRow> ReadLog(PackedBuffer buf)
         {
-            var commits = new List<CommitRow>();
-            foreach (string rec in raw.Split(RS))
+            int count = buf.RecordCount;
+            var commits = new List<CommitRow>(count);
+            for (int i = 0; i < count; i++)
             {
-                string record = rec.TrimStart('\n', '\r');
-                if (record.Length == 0)
-                    continue;
-
-                string[] f = record.Split(US);
-                if (f.Length < 12)
-                    continue;
-
-                var parents = f[2].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                string[] parents = buf.ArrayItems(i, LogOffParents);
                 var row = new CommitRow
                 {
-                    FullHash = f[0],
-                    Hash = f[1],
+                    FullHash = buf.Str(i, LogOffFullHash),
+                    Hash = buf.Str(i, LogOffShortHash),
                     ParentHashes = parents,
-                    Parents = parents.Length == 0
-                        ? "—"
-                        : string.Join(", ", parents.Select(Short)),
-                    Author = f[3],
-                    AuthorEmail = f[4],
-                    AuthorDate = ParseDate(f[5]),
-                    Committer = f[6],
-                    CommitterEmail = f[7],
-                    CommitDate = ParseDate(f[8]),
-                    Message = f[10],
-                    Body = f[11].TrimEnd('\n', '\r'),
+                    Parents = parents.Length == 0 ? "—" : string.Join(", ", parents.Select(Short)),
+                    Author = buf.Str(i, LogOffAuthorName),
+                    AuthorEmail = buf.Str(i, LogOffAuthorEmail),
+                    AuthorDate = FromUnixWithOffset(buf.I64(i, LogOffAuthorTime),
+                                                    buf.I32(i, LogOffAuthorTz)),
+                    Committer = buf.Str(i, LogOffCommitterName),
+                    CommitterEmail = buf.Str(i, LogOffCommitterEmail),
+                    CommitDate = FromUnixWithOffset(buf.I64(i, LogOffCommitTime),
+                                                    buf.I32(i, LogOffCommitTz)),
+                    Message = buf.Str(i, LogOffSubject),
+                    Body = buf.Str(i, LogOffBody),
                 };
                 row.Date = FormatDate(row.AuthorDate);
                 row.CommitterDate = FormatDate(row.CommitDate);
-                foreach (var badge in ParseDecorations(f[9]))
-                    row.Badges.Add(badge);
+
+                int badges = buf.ArrayCount(i, LogOffBadges);
+                for (int b = 0; b < badges; b++)
+                {
+                    (uint kind, string text) = buf.TaggedItem(i, LogOffBadges, b);
+                    row.Badges.Add(new Badge { Kind = (BadgeKind)kind, Text = text });
+                }
+
                 commits.Add(row);
             }
-            // The graph is NOT assigned here. Lane layout is cross-row by nature — where a commit
-            // sits depends on its children — so it belongs to the whole list, not to record
-            // parsing. See CommitGraph.
             return commits;
-        }
-
-        internal static IEnumerable<Badge> ParseDecorations(string decorations)
-        {
-            if (string.IsNullOrWhiteSpace(decorations))
-                yield break;
-
-            foreach (string rawToken in decorations.Split(','))
-            {
-                string token = rawToken.Trim();
-                if (token.Length == 0)
-                    continue;
-
-                if (token.StartsWith("tag:", StringComparison.Ordinal))
-                {
-                    yield return new Badge { Kind = BadgeKind.Tag, Text = token["tag:".Length..].Trim() };
-                }
-                else if (token.Contains("->"))
-                {
-                    // "HEAD -> main": HEAD pointer plus the local branch it points at.
-                    int arrow = token.IndexOf("->", StringComparison.Ordinal);
-                    string left = token[..arrow].Trim();
-                    string right = token[(arrow + 2)..].Trim();
-                    yield return new Badge { Kind = BadgeKind.Head, Text = left };
-                    if (right.Length > 0)
-                        yield return new Badge { Kind = BadgeKind.LocalBranch, Text = right };
-                }
-                else if (token == "HEAD")
-                {
-                    yield return new Badge { Kind = BadgeKind.Head, Text = "HEAD" };
-                }
-                else if (token.Contains('/'))
-                {
-                    yield return new Badge { Kind = BadgeKind.RemoteBranch, Text = token };
-                }
-                else
-                {
-                    yield return new Badge { Kind = BadgeKind.LocalBranch, Text = token };
-                }
-            }
         }
 
         // ---- Refs (sidebar) --------------------------------------------------------------------
@@ -200,7 +182,7 @@ namespace MasterSplinter.Entrypoint.Git
         public IReadOnlyList<CommitRow> SearchLog(SearchMode mode, string query, string pathFilter,
                                                   int order, int maxCount, bool matchCase,
                                                   bool useRegex, bool allBranches)
-            => WithGraph(ParseCommitRecords(NativeLogic.GitSearchLog(RootPath, SearchModeArg(mode), query,
+            => WithGraph(ReadLog(NativeLogic.GitSearchLog(RootPath, SearchModeArg(mode), query,
                                                             pathFilter, order, maxCount, matchCase,
                                                             useRegex, allBranches)));
 

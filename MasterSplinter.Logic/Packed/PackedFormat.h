@@ -98,4 +98,15 @@ namespace ms::packed
         std::uint32_t off = 0;
         std::uint32_t count = 0;
     };
+
+    // A string carrying a small integer tag -- a decoration and its badge kind, say. Stored in
+    // the heap as 12 bytes: {tag u32, off u32, len u32}.
+    struct TaggedRef
+    {
+        std::uint32_t tag = 0;
+        StringRef ref;
+    };
+
+    inline constexpr std::uint32_t kTaggedRefSize = 12;
+    inline constexpr std::uint32_t kStringRefSize = 8;
 }

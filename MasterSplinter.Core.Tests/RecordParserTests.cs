@@ -5,99 +5,16 @@ using MasterSplinter.Entrypoint.Models;
 namespace MasterSplinter.Core.Tests;
 
 /// <summary>
-/// The record-shaped reads: the 12-field commit format (shared by Log and SearchLog), name-status,
-/// and --shortstat. Separators are written \u001f / \u001e, never \x1f — C# hex escapes are greedy.
+/// The record-shaped reads that are still parsed on the host: name-status and --shortstat.
+/// <para>
+/// The 12-field commit format used to be here too. It moved to the native core in Phase D --
+/// see the LogRecords and SplitMessage suites in <c>parse_test.cpp</c>, and
+/// <c>LogUnpackTests</c> for the host half.
+/// </para>
+/// Separators are written \u001f / \u001e, never \x1f -- C# hex escapes are greedy.
 /// </summary>
 public class RecordParserTests
 {
-    private const string US = "\u001f";
-    private const string RS = "\u001e";
-
-    /// <summary>One commit record in the exact field order MsGitLog emits.</summary>
-    private static string Record(string parents, string decorations, string subject)
-        => string.Join(US,
-               "a1b2c3d4e5f6a7b8c9d0", "a1b2c3d", parents,
-               "Alice", "a@a", "2026-01-02T03:04:05+00:00",
-               "Bob", "b@b", "2026-01-02T04:05:06+00:00",
-               decorations, subject, "Body text") + RS;
-
-    private static string Sample(string parents = "", string decorations = "", string subject = "Subject")
-        => Record(parents, decorations, subject);
-
-    [Fact]
-    public void AllTwelveFieldsLandInTheRightPlaces()
-    {
-        CommitRow row = Assert.Single(GitRepository.ParseCommitRecords(Sample()));
-
-        Assert.Equal("a1b2c3d4e5f6a7b8c9d0", row.FullHash);
-        Assert.Equal("a1b2c3d", row.Hash);
-        Assert.Equal("Alice", row.Author);
-        Assert.Equal("a@a", row.AuthorEmail);
-        Assert.Equal("Bob", row.Committer);
-        Assert.Equal("b@b", row.CommitterEmail);
-        Assert.Equal("Subject", row.Message);
-        Assert.Equal("Body text", row.Body);
-    }
-
-    [Fact]
-    public void RecordsShorterThanTwelveFieldsAreDropped()
-    {
-        // The field-count floor is what keeps git's error text off the commit list when a read
-        // ignores the exit code.
-        Assert.Empty(GitRepository.ParseCommitRecords(
-            "fatal: your current branch does not have any commits yet" + RS));
-    }
-
-    [Fact]
-    public void MultipleRecordsAreSeparatedByRs()
-    {
-        List<CommitRow> rows = GitRepository.ParseCommitRecords(
-            Sample(subject: "first") + Sample(subject: "second"));
-
-        Assert.Equal(2, rows.Count);
-        Assert.Equal("first", rows[0].Message);
-        Assert.Equal("second", rows[1].Message);
-    }
-
-    [Fact]
-    public void ParentsAreSplitOnSpaces()
-    {
-        CommitRow row = Assert.Single(GitRepository.ParseCommitRecords(
-            Sample(parents: "1111111111 2222222222")));
-
-        Assert.Equal(2, row.ParentHashes.Length);
-        Assert.Equal("1111111111", row.ParentHashes[0]);
-        Assert.Equal("2222222222", row.ParentHashes[1]);
-    }
-
-    [Fact]
-    public void ARootCommitHasNoParents()
-        => Assert.Empty(Assert.Single(GitRepository.ParseCommitRecords(Sample())).ParentHashes);
-
-    [Fact]
-    public void MergeCommitsAreDetectableFromParentCount()
-    {
-        CommitRow merge = Assert.Single(GitRepository.ParseCommitRecords(
-            Sample(parents: "aaaaaaa bbbbbbb")));
-        Assert.True(merge.ParentHashes.Length > 1);
-    }
-
-    [Fact]
-    public void DecorationsBecomeBadges()
-    {
-        CommitRow row = Assert.Single(GitRepository.ParseCommitRecords(
-            Sample(decorations: "HEAD -> main, origin/main, tag: v1.0")));
-        Assert.NotEmpty(row.Badges);
-    }
-
-    [Fact]
-    public void NoDecorationsMeansNoBadges()
-        => Assert.Empty(Assert.Single(GitRepository.ParseCommitRecords(Sample())).Badges);
-
-    [Fact]
-    public void EmptyInputYieldsNoCommits()
-        => Assert.Empty(GitRepository.ParseCommitRecords(""));
-
     // ---- name-status --------------------------------------------------------------------------
 
     [Fact]

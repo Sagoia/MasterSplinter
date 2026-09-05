@@ -212,6 +212,26 @@ namespace MasterSplinter.Entrypoint.Interop
                               BinaryPrimitives.ReadUInt32LittleEndian(Span.Slice((int)entry + 4)));
         }
 
+        /// <summary>
+        /// One element of an array-of-TAGGED-strings field: 12 bytes each, {tag, off, len}. Used
+        /// for a commit's ref decorations, where each carries its badge kind.
+        /// </summary>
+        public (uint Tag, string Text) TaggedItem(int record, int field, int index)
+        {
+            int at = FieldAt(record, field, 8);
+            if (at < 0 || index < 0 || index >= ArrayCount(record, field))
+                return (0, string.Empty);
+
+            uint arrayOff = BinaryPrimitives.ReadUInt32LittleEndian(Span.Slice(at));
+            long entry = Header(OffHeapOffset) + arrayOff + ((long)index * 12);
+            if (entry + 12 > _bytes!.Length)
+                return (0, string.Empty);
+
+            uint tag = BinaryPrimitives.ReadUInt32LittleEndian(Span.Slice((int)entry));
+            return (tag, HeapString(BinaryPrimitives.ReadUInt32LittleEndian(Span.Slice((int)entry + 4)),
+                                    BinaryPrimitives.ReadUInt32LittleEndian(Span.Slice((int)entry + 8))));
+        }
+
         /// <summary>All elements of an array-of-strings field.</summary>
         public string[] ArrayItems(int record, int field)
         {

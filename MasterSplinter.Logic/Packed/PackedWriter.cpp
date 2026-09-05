@@ -75,6 +75,25 @@ namespace ms::packed
         return arr;
     }
 
+    ArrayRef PackedWriter::AddTaggedRefs(const std::vector<TaggedRef>& items)
+    {
+        if (items.empty())
+            return ArrayRef{};
+
+        Pad(heap_, 4);
+
+        ArrayRef arr;
+        arr.off = static_cast<std::uint32_t>(heap_.size());
+        arr.count = static_cast<std::uint32_t>(items.size());
+        for (const TaggedRef& t : items)
+        {
+            AppendU32(heap_, t.tag);
+            AppendU32(heap_, t.ref.off);
+            AppendU32(heap_, t.ref.len);
+        }
+        return arr;
+    }
+
     void PackedWriter::BeginRecord()
     {
         recordStart_ = records_.size();

@@ -200,6 +200,7 @@
     <ClInclude Include="Packed\PackedWriter.h" />
     <ClInclude Include="Parse\BlameParser.h" />
     <ClInclude Include="Parse\DiffParser.h" />
+    <ClInclude Include="Parse\LogParser.h" />
     <ClInclude Include="Platform\IProcessRunner.h" />
     <ClInclude Include="Platform\IPlatformFactory.h" />
     <ClInclude Include="Platform\Windows\WindowsProcessRunner.h" />
@@ -227,6 +228,7 @@
     <ClCompile Include="Packed\PackedWriter.cpp" />
     <ClCompile Include="Parse\BlameParser.cpp" />
     <ClCompile Include="Parse\DiffParser.cpp" />
+    <ClCompile Include="Parse\LogParser.cpp" />
     <ClCompile Include="Platform\PlatformFactory.cpp" />
     <ClCompile Include="Platform\Windows\WindowsPlatformFactory.cpp" />
     <!-- macOS Adapter (Apple frameworks): built only by the macOS toolchain, never by this

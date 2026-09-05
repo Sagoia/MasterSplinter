@@ -42,11 +42,17 @@ extern "C" {
 	// "OK\x1f<toplevel>\x1f<branch>" on success, or "ERR\x1f<message>" if not a repository.
 	MASTERSPLINTERLOGIC_API char* MsGitOpenRepository(const char* path);
 
-	// One record per commit (separated by 0x1E); fields (separated by 0x1F) are:
-	// fullHash, shortHash, parents, authorName, authorEmail, authorDateISO,
-	// committerName, committerEmail, committerDateISO, refDecorations, subject, body.
+	// PACKED (Kind::Log). One record per commit, already parsed -- see Packed/PackedFormat.h for
+	// the buffer layout and Parse/LogParser.h for the record fields. *outLen holds the byte count.
+	//
+	// The underlying git stream is NUL-separated (-z) and carries the message as one trailing %B
+	// field: a commit message can contain 0x1E or 0x1F, and under the old delimited format either
+	// byte desynced the records -- a 0x1E split one in two, a 0x1F shifted every later field.
+	// See GitLogFormat.h.
+	//
 	// order: 0=date, 1=topo, 2=reverse-date, 3=author-date. maxCount<=0 means no limit.
-	MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount);
+	MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount,
+	                                       int* outLen);
 
 	// One record per ref (records separated by 0x1E, fields by 0x1F) covering refs/heads,
 	// refs/tags and refs/remotes in refname order. Always exactly 8 fields, several of which are
@@ -332,8 +338,7 @@ extern "C" {
 	                                         bool ignoreWhitespace, const char* detectMoves,
 	                                         int* outLen);
 
-	// Commit search. Records are byte-identical to MsGitLog's 12-field layout, so one host-side
-	// parser serves both. `mode` picks exactly ONE git predicate — deliberately one, because git
+	// Commit search. PACKED (Kind::Log), byte-identical to MsGitLog, so one parser serves both. `mode` picks exactly ONE git predicate — deliberately one, because git
 	// ANDs --grep with --author rather than ORing them, so a combined "message or author" search
 	// would silently return the intersection:
 	//   "message"  --grep=<query>       (--fixed-strings unless useRegex)
@@ -344,13 +349,13 @@ extern "C" {
 	// `pathFilter` narrows any mode further (appended after --). matchCase=false adds
 	// --regexp-ignore-case; allBranches adds --all; `order` and `maxCount` are as in MsGitLog.
 	//
-	// Empty string — with no log walk — for: an unknown mode, a blank query AND blank pathFilter,
+	// An empty record set — with no log walk — for: an unknown mode, a blank query AND blank pathFilter,
 	// or a "hash" query that resolves to nothing (a typo must not surface as git's error text
 	// rendered into the commit list).
 	MASTERSPLINTERLOGIC_API char* MsGitSearchLog(const char* root, const char* mode,
 	                                             const char* query, const char* pathFilter,
 	                                             int order, int maxCount, bool matchCase,
-	                                             bool useRegex, bool allBranches);
+	                                             bool useRegex, bool allBranches, int* outLen);
 
 	// git reflog show [-n<maxCount>] <ref>; empty `ref` means HEAD. One record per entry (0x1E),
 	// seven 0x1F-separated fields:

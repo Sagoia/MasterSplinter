@@ -80,6 +80,27 @@ namespace MasterSplinter.Entrypoint.Git
                 ? d
                 : DateTimeOffset.MinValue;
 
+        /// <summary>
+        /// Builds a timestamp from the unix seconds + signed minute offset the packed log and
+        /// blame records carry. Lives here rather than in either area file because both use it —
+        /// see the split trap in docs/refactoring.md.
+        /// </summary>
+        private static DateTimeOffset FromUnixWithOffset(long unixSeconds, int offsetMinutes)
+        {
+            if (unixSeconds <= 0)
+                return DateTimeOffset.MinValue;
+            try
+            {
+                return DateTimeOffset.FromUnixTimeSeconds(unixSeconds)
+                                     .ToOffset(TimeSpan.FromMinutes(offsetMinutes));
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // A corrupt timestamp or a >14h offset must cost one row's date, not the whole list.
+                return DateTimeOffset.MinValue;
+            }
+        }
+
         private static string FormatDate(DateTimeOffset d)
             => d == DateTimeOffset.MinValue
                 ? ""

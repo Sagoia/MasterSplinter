@@ -1,10 +1,12 @@
 #include "pch.h"
 
 #include <string>
+#include <vector>
 
 #include "PackedRead.h"
 #include "Parse/BlameParser.h"
 #include "Parse/DiffParser.h"
+#include "Parse/LogParser.h"
 
 // Parsers migrated from the host during Phase D. Each suite here replaces an xunit file that was
 // deleted in the same commit, so the coverage moved rather than shrank.
@@ -394,4 +396,191 @@ TEST(PorcelainBlame, EmptyInputProducesNoRecords)
     const PackedRead p = Blame("");
     EXPECT_EQ(p.Count(), 0u);
     EXPECT_FALSE(p.IsError());
+}
+
+// ---- Commit log records (was RecordParserTests.cs, the commit half) ----------------------------
+
+namespace
+{
+    const char kUsCh = '\x1f';
+    const char kRsCh = '\x1e';
+
+    // One commit record in the exact field order GitLogFormat.h emits. Records are separated by
+    // NUL, not by 0x1E -- which is the whole point of the format.
+    std::string LogRecord(std::string parents = "", std::string decorations = "",
+                          std::string message = "Subject", std::string authorTime = "1767322995",
+                          std::string authorTz = "+0000")
+    {
+        const std::string f(1, kUsCh);
+        return "a1b2c3d4e5f6a7b8c9d0" + f + "a1b2c3d" + f + parents + f +
+               "Alice" + f + "a@a" + f + authorTime + f + authorTz + f +
+               "Bob" + f + "b@b" + f + "1767326706" + f + "+0200" + f +
+               decorations + f + message;
+    }
+
+    std::string Stream(const std::vector<std::string>& records)
+    {
+        std::string out;
+        for (std::size_t i = 0; i < records.size(); ++i)
+        {
+            if (i)
+                out.push_back('\0');
+            out += records[i];
+        }
+        return out;
+    }
+
+    PackedRead Log(const std::string& raw) { return PackedRead(pr::ParseLogRecords(raw)); }
+}
+
+TEST(LogRecords, EveryFieldLandsInItsOwnSlot)
+{
+    const PackedRead p = Log(LogRecord());
+
+    EXPECT_EQ(p.Kind(), ms::packed::Kind::Log);
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffFullHash), "a1b2c3d4e5f6a7b8c9d0");
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffShortHash), "a1b2c3d");
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffAuthorName), "Alice");
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffAuthorEmail), "a@a");
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffCommitterName), "Bob");
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffCommitterEmail), "b@b");
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffSubject), "Subject");
+}
+
+TEST(LogRecords, TimestampsAndOffsetsTravelAsNumbers)
+{
+    const PackedRead p = Log(LogRecord("", "", "Subject", "1767322995", "+0700"));
+
+    EXPECT_EQ(p.RecI64(0, pr::kLogOffAuthorTime), 1767322995LL);
+    EXPECT_EQ(p.RecI32(0, pr::kLogOffAuthorTz), 7 * 60);
+    EXPECT_EQ(p.RecI64(0, pr::kLogOffCommitTime), 1767326706LL);
+    EXPECT_EQ(p.RecI32(0, pr::kLogOffCommitTz), 2 * 60);
+}
+
+TEST(LogRecords, RecordsShortOfTheFieldFloorAreDropped)
+{
+    // The floor is what keeps git's error text off the commit list: Log deliberately ignores the
+    // exit code, so a "fatal:" line arrives through the same channel as a real record.
+    EXPECT_EQ(Log("fatal: your current branch does not have any commits yet").Count(), 0u);
+    EXPECT_EQ(Log("").Count(), 0u);
+}
+
+TEST(LogRecords, RecordsAreSeparatedByNul)
+{
+    const PackedRead p = Log(Stream({ LogRecord("", "", "first"), LogRecord("", "", "second") }));
+
+    ASSERT_EQ(p.Count(), 2u);
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffSubject), "first");
+    EXPECT_EQ(p.RecStr(1, pr::kLogOffSubject), "second");
+}
+
+TEST(LogRecords, ParentsAreSplitOnSpaces)
+{
+    const PackedRead p = Log(LogRecord("1111111111 2222222222"));
+    // Parents live in the heap as an array of string refs; the host resolves them by index.
+    EXPECT_EQ(p.RecI32(0, pr::kLogOffParents + 4), 2);
+}
+
+TEST(LogRecords, ARootCommitHasNoParents)
+{
+    EXPECT_EQ(Log(LogRecord("")).RecI32(0, pr::kLogOffParents + 4), 0);
+}
+
+TEST(LogRecords, MergeCommitsAreDetectableFromParentCount)
+{
+    EXPECT_GT(Log(LogRecord("aaaaaaa bbbbbbb")).RecI32(0, pr::kLogOffParents + 4), 1);
+}
+
+TEST(LogRecords, DecorationsBecomeTaggedBadges)
+{
+    // "HEAD -> main" is ONE token but TWO badges: the pointer and the branch it points at.
+    const PackedRead p = Log(LogRecord("", "HEAD -> main, origin/main, tag: v1.0"));
+    EXPECT_EQ(p.RecI32(0, pr::kLogOffBadges + 4), 4);
+}
+
+TEST(LogRecords, NoDecorationsMeansNoBadges)
+{
+    EXPECT_EQ(Log(LogRecord("")).RecI32(0, pr::kLogOffBadges + 4), 0);
+}
+
+// ---- The delimiter bug this format exists to kill -----------------------------------------------
+
+TEST(LogRecords, ARecordSeparatorInsideTheMessageNoLongerSplitsTheRecord)
+{
+    // Reproduced against git 2.54 under the old format: a 0x1E in a body ended the record early
+    // and the remainder became a fragment the field-count floor then dropped -- one commit
+    // silently lost its body AND produced a phantom half-record.
+    std::string message = "subject";
+    message += '\n';
+    message += '\n';
+    message += "body";
+    message += kRsCh;
+    message += "tail";
+
+    const PackedRead p = Log(LogRecord("", "", message));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffSubject), "subject");
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffBody), std::string("body") + kRsCh + "tail");
+}
+
+TEST(LogRecords, AUnitSeparatorInsideTheMessageNoLongerShiftsTheFields)
+{
+    // The other half of the same bug: a 0x1F in a subject used to truncate it, push the body into
+    // the subject's slot, and drop the real body. The bounded split keeps everything in %B.
+    std::string message = "sub";
+    message += kUsCh;
+    message += "ject";
+    message += '\n';
+    message += '\n';
+    message += "the body";
+
+    const PackedRead p = Log(LogRecord("", "", message));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffSubject), std::string("sub") + kUsCh + "ject");
+    EXPECT_EQ(p.RecStr(0, pr::kLogOffBody), "the body");
+}
+
+// ---- Subject / body split (reproducing what %s and %b used to emit) ------------------------------
+
+TEST(SplitMessage, TheFirstParagraphIsTheSubjectAndItsNewlinesFoldToSpaces)
+{
+    // Verified against git 2.54: %s folds the first paragraph onto one line, %b is the rest.
+    std::string subject, body;
+    pr::SplitMessage("line one of subject\nline two of subject\n\nbody para one\n\nbody para two\n",
+                     subject, body);
+
+    EXPECT_EQ(subject, "line one of subject line two of subject");
+    EXPECT_EQ(body, "body para one\n\nbody para two");
+}
+
+TEST(SplitMessage, AOneLineMessageHasNoBody)
+{
+    std::string subject, body;
+    pr::SplitMessage("just a subject\n", subject, body);
+
+    EXPECT_EQ(subject, "just a subject");
+    EXPECT_EQ(body, "");
+}
+
+TEST(SplitMessage, CrlfBlankLinesSeparateJustAsWell)
+{
+    // A commit message keeps whatever line endings it was written with.
+    std::string subject, body;
+    pr::SplitMessage("subject\r\n\r\nbody\r\n", subject, body);
+
+    EXPECT_EQ(subject, "subject");
+    EXPECT_EQ(body, "body");
+}
+
+TEST(SplitMessage, AnEmptyMessageYieldsNothing)
+{
+    std::string subject, body;
+    pr::SplitMessage("", subject, body);
+    EXPECT_EQ(subject, "");
+    EXPECT_EQ(body, "");
+
+    pr::SplitMessage("\n\n\n", subject, body);
+    EXPECT_EQ(subject, "");
+    EXPECT_EQ(body, "");
 }

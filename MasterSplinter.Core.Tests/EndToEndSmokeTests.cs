@@ -263,6 +263,70 @@ public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
     }
 
     [Fact]
+    public void ACommitMessageContainingTheSeparatorBytesRoundTripsIntact()
+    {
+        // The bug Phase D's log format exists to kill, proven against real git rather than against
+        // a hand-written sample. Under the old format (records ended with %x1e, message split
+        // across %s and %b) this commit came back with a truncated subject, a body holding the
+        // subject's tail, and a phantom half-record that the field-count floor then dropped.
+        //
+        // Its own repository, not the shared fixture: a commit this odd should not be able to
+        // perturb what every other test reads.
+        Assert.True(_repo.Usable, "scratch repo unavailable: " + _repo.SkipReason);
+
+        string dir = Path.Combine(Path.GetTempPath(), "ms-sep-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            void Run(string args)
+            {
+                var psi = new ProcessStartInfo("git", args)
+                {
+                    WorkingDirectory = dir,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                };
+                using Process p = Process.Start(psi) ?? throw new InvalidOperationException("git did not start");
+                p.WaitForExit();
+            }
+
+            Run("init -q -b main");
+            Run("config user.email test@example.com");
+            Run("config user.name \"Test User\"");
+            Run("config commit.gpgsign false");
+            File.WriteAllText(Path.Combine(dir, "f.txt"), "x\n");
+
+            // 0x1F in the subject AND 0x1E in the body -- the two failures are independent.
+            const string subject = "sub\u001fject line";
+            const string body = "body\u001etail";
+            string messageFile = Path.Combine(dir, "msg.txt");
+            File.WriteAllText(messageFile, subject + "\n\n" + body + "\n");
+
+            Run("add f.txt");
+            Run("commit -q -F msg.txt");
+
+            GitRepository? git = GitRepository.Open(dir, out string? error);
+            Assert.Null(error);
+            Assert.NotNull(git);
+
+            CommitRow row = Assert.Single(git!.Log(order: 0, maxCount: 10));
+            Assert.Equal(subject, row.Message);
+            Assert.Equal(body, row.Body);
+        }
+        finally
+        {
+            try
+            {
+                foreach (string f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                    File.SetAttributes(f, FileAttributes.Normal);
+                Directory.Delete(dir, recursive: true);
+            }
+            catch { /* a leftover temp dir is not worth failing a test run over */ }
+        }
+    }
+
+    [Fact]
     public void SearchFindsACommitByMessage()
     {
         IReadOnlyList<CommitRow> hits = Open().SearchLog(
