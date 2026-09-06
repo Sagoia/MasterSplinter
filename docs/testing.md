@@ -5,9 +5,9 @@ The third deliberately is not: it exists to check the assumptions the other two 
 
 | Suite | Covers | Runner |
 |---|---|---|
-| `MasterSplinter.Logic.Tests` (Google Test) | The C++ core - command building, the git-output parsers, and the packed wire format: **288 cases / 63 suites** | `MasterSplinter.Logic.Tests.exe` |
+| `MasterSplinter.Logic.Tests` (Google Test) | The C++ core - command building, the git-output parsers, the packed wire format, and the graph layout: **307 cases / 65 suites** | `MasterSplinter.Logic.Tests.exe` |
 | `MasterSplinter.Core.Tests` (xunit) | The host: packed unpacking, ABI contracts and extracted policy: **224 cases** | `dotnet test` |
-| `EndToEndSmokeTests` (in the same xunit project) | The real native DLL + real git against a scratch repo: **16 cases** | `dotnet test` |
+| `EndToEndSmokeTests` (in the same xunit project) | The real native DLL + real git against a scratch repo: **17 cases** | `dotnet test` |
 
 **Phase D moved the parsers, and the coverage moved with them.** Every xunit file it deleted was
 replaced by gtest cases in the same commit, usually with a few more: `RecordParserTests`,
@@ -149,6 +149,24 @@ resolves now that `NativeLogic` lives in its own assembly — a class of breakag
 
 Skips itself (rather than failing) when git or the native DLL is unavailable, so a machine without them
 still gets a green unit run. CI builds the native core before the managed test step so these run there.
+
+## The commit graph
+
+`GraphLayout` is pure integer logic, so its 19 cases need no `FakeProcessRunner` at all: they feed
+adjacency lists directly. They cover the shapes that actually go wrong - straight line, fork,
+octopus, criss-cross, orphan roots, `--all` with disjoint roots, lane reuse after a branch ends,
+and stability when the window truncates parents - plus the display list's own invariants (nothing
+drawn outside a row's laneCount, every colour in range).
+
+`TheCommitGraphIsLaidOutOverRealHistory` decodes the display list byte for byte against the
+fixture's real merge. Since there is no C# graph model any more, that IS the contract the renderer
+depends on.
+
+**The renderer itself has no automated coverage, deliberately.** It is verified visually against
+`git log --graph --oneline --all` on a merge-heavy repository - which is also how two real defects
+were found that no unit test would have: the graph fanning into a wall of lines without lane
+folding, and `GraphCanvas` painting over the Description column because it had only ever been one
+lane wide.
 
 ## Coverage gaps
 

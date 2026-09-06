@@ -14,7 +14,7 @@ each OS keeps its own UI. Windows ships today, macOS is the next target.
 | Interop | `MasterSplinter.Core` | `NativeLogic` is the only P/Invoke site and is `internal`; the app sees only the `NativeCore` lifecycle facade. Marshals UTF-8, frees native strings via `MsGitFree`. |
 | Git service | `MasterSplinter.Core` | **Unpacks** the packed buffers into models - parsing itself is native. Instance per open repo; replaced wholesale on refresh. Split by area into `GitRepository.<Area>.cs`, **mirroring the native `GitBackend.<Area>.cpp` files** so both sides of one ABI area sit under the same name. |
 | View models | `ViewModels/` | Selection, async loading, search. Every native call runs on `Task.Run`. |
-| UI | `Controls/`, `MainWindow.xaml`, `Themes/` | WinUI 3 shell, history + graph, diff panels, light/dark. |
+| UI | `Controls/`, `MainWindow.xaml`, `Themes/` | WinUI 3 shell, history + graph, diff panels, light/dark. The commit graph is the exception: a `SwapChainPanel` drawn by the native Direct2D renderer, not by XAML. |
 
 ## C++ core design
 
@@ -38,8 +38,18 @@ host at all: a macOS UI cannot call the C# ones.
 |---|---|
 | Bridge | `GitBackend` delegates process launch to `IProcessRunner` — command-building and OS execution vary independently. |
 | Adapter | `WindowsProcessRunner` / `MacProcessRunner` wrap the OS API behind `IProcessRunner`. |
-| Abstract Factory | `IPlatformFactory` builds the platform's services. |
-| Factory Method | `CreateProcessRunner()`; `CreatePlatformFactory()` picks per OS (`_WIN32` / `__APPLE__`), in exactly one file. |
+| Abstract Factory | `IPlatformFactory` builds the platform's services - now two of them. |
+| Factory Method | `CreateProcessRunner()` and `CreateGraphRenderer()`; `CreatePlatformFactory()` picks per OS (`_WIN32` / `__APPLE__`), in exactly one file. |
+
+The family gained its second product when the commit graph landed: `IGraphRenderer`, implemented
+on Windows by `Render/Windows/D2DGraphRenderer` and returning `nullptr` on macOS until there is a
+CoreGraphics one. **No existing call site changed to get it** - which is the whole point of having
+expressed a single-product family as an Abstract Factory in the first place.
+
+`Render/Windows/D2DGraphRenderer.cpp` is the SECOND translation unit allowed to include
+`<windows.h>`, via the D3D and D2D headers. The invariant it joins `WindowsProcessRunner` in
+holding is unchanged: platform code lives under a `Windows/` folder, and nothing else in the core
+depends on Windows headers.
 
 Adapters are the OS seam and use the **full, mixed** platform API — Windows mixes classic Win32
 (`CreateProcessW`) with C++/WinRT (`winrt::to_hstring`) and WIL (RAII handles); macOS mixes Foundation
@@ -185,8 +195,6 @@ Recorded here so it isn't rediscovered. See the refactor plan for the intended f
   policy into Core behind a host interface gets logic under test without touching VM construction.
 - **No C# tests**, and `MainViewModel` cannot be constructed headless (its constructor calls
   `DispatcherQueue.GetForCurrentThread()` and reads `ApplicationData`).
-- **The commit graph is a placeholder** - one blue lane per row; parents are parsed but unused. See
-  **[graph.md](graph.md)**.
 - **The reflog narrows the separator problem rather than eliminating it.** It has two free-form fields
   (`%s` and `%gs`) and only one can be last, so a `0x1F` in a commit subject can still shift into the
   reflog subject. Bounded to one row; the stream itself cannot desync.

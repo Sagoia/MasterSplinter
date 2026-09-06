@@ -75,6 +75,7 @@ what makes them directly gtest-able with no fake.
 | Area | Exports |
 |---|---|
 | Lifecycle | `MsLogicInitialize` `MsLogicShutdown` `MsLogicVersion` `MsLogicAdd` |
+| Commit graph | `MsGraphCreate` `MsGraphSetModel` `MsGraphSetViewport` `MsGraphSetTheme` `MsGraphSetSelection` `MsGraphRender` `MsGraphDestroy` |
 | Repository | `MsGitIsRepository` `MsGitOpenRepository` |
 | History | `MsGitLog` `MsGitRefDetails` |
 | Commit inspection | `MsGitCommitFiles` `MsGitCommitShortStat` `MsGitFileDiff` `MsGitFileAtCommit` |
@@ -87,6 +88,24 @@ what makes them directly gtest-able with no fake.
 | Stash | `MsGitStashList` `MsGitStashSave` `MsGitStashApply` `MsGitStashPop` `MsGitStashDrop` |
 | Blame / search / reflog | `MsGitBlame` `MsGitSearchLog` `MsGitReflog` |
 | Memory | `MsGitFree` |
+
+## The one handle-based convention
+
+Everything above is stateless: pass a repository root, get a payload. The commit-graph renderer is
+not - it owns a GPU device and a swap chain that have to live across calls - so `MsGraphCreate`
+returns an opaque handle and the rest take it back.
+
+`MsGraphCreate` is given the `SwapChainPanel`'s `IUnknown*`; the native side QIs
+`ISwapChainPanelNative` and does every piece of COM and D3D work itself. It returns `nullptr` when
+no device could be created, every other call tolerates a null handle, and nothing throws - so a
+machine with no usable graphics device shows a blank graph column rather than failing to open a
+repository.
+
+`MsGraphSetTheme` and `MsGraphSetSelection` exist for a reason worth knowing before designing
+anything else on a `SwapChainPanel`: **a WinUI 3 desktop `SwapChainPanel` does not blend with the
+XAML content behind it.** A fully transparent clear renders black, not the rows underneath -
+measured, not assumed. The renderer therefore paints the row background and the selection band
+itself. See **[graph.md](graph.md)**.
 
 ## Progress & cancellation
 

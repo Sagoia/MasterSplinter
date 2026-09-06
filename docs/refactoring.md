@@ -2,7 +2,7 @@
 
 **This pass is refactoring only.** No feature was added, removed or changed. Everything here is
 structure, tests, and two behaviour bugs found *by* the new tests. The commit deliberately contains
-no work from Phases D, E or F — see [Deferred](#deferred) below.
+no work from Phases D, E or F - see [the deferred section](#deferred-at-the-time-and-what-became-of-them) below.
 
 **Verified at the end:** 188/188 native gtest, 227/227 managed xunit (213 unit + 14 end-to-end),
 clean rebuild with zero warnings, packaged app launches.
@@ -97,18 +97,20 @@ four different claims. See `testing.md`.
 
 ---
 
-## Deferred
+## Deferred at the time, and what became of them
 
-**Phases D, E and F are explicitly out of scope for this commit** and are not started.
+**Phases D, E and F were explicitly out of scope for that pass** and were not started. They have
+since landed, in nine commits; the statuses below are the outcome, not the plan.
 
 | Phase | Status |
 |---|---|
 | **D** - parsers to C++ behind a packed wire format | **Done** (D0-D6). The testability worry did not materialise: only the parser subset moved (~60 xunit cases, not 213), each deleted file was replaced by gtest cases in the same commit, and both suites grew overall. The deciding argument turned out to be neither macOS reuse nor wall-clock but **correctness**: a length-prefixed format makes the `0x1F`/`0x1E` desync impossible by construction. |
-| **E** — lane layout in C++ | Deferred. Groundwork is done: `CommitGraph.Assign` is the single seam (one method body to replace), `CommitIndex` provides the hash→position lookup, and `Models/Graph.cs` isolates the placeholder types. |
-| **F** — Direct2D `SwapChainPanel` renderer | Deferred. Design settled in `graph.md`. |
+| **E** - lane layout in C++ | **Done.** The groundwork paid off exactly as intended: one method body replaced, and the hash-to-position lookup was already the thing the layout needed. |
+| **F** - Direct2D `SwapChainPanel` renderer | **Done**, in two commits. `Models/Graph.cs` being isolated made the last step a file deletion rather than an untangling - see `graph.md` for the four places the design turned out to be wrong once driven. |
 
-**E does not depend on D** — the graph display list is its own small fixed-size payload and does not
-need the general packed wire format first.
+**E did in the end depend on D**, because of a choice made when the phases were picked up: the
+graph rides in the packed log buffer's extra section rather than in a payload of its own, so that
+one git spawn produces both the rows and the lanes laid out over them.
 
 ---
 
