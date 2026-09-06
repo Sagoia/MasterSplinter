@@ -42,11 +42,28 @@ extern "C" {
 	// "OK\x1f<toplevel>\x1f<branch>" on success, or "ERR\x1f<message>" if not a repository.
 	MASTERSPLINTERLOGIC_API char* MsGitOpenRepository(const char* path);
 
-	// One record per commit (separated by 0x1E); fields (separated by 0x1F) are:
-	// fullHash, shortHash, parents, authorName, authorEmail, authorDateISO,
-	// committerName, committerEmail, committerDateISO, refDecorations, subject, body.
+	// PACKED (Kind::Log). One record per commit, already parsed -- see Packed/PackedFormat.h for
+	// the buffer layout and Parse/LogParser.h for the record fields. *outLen holds the byte count.
+	//
+	// The underlying git stream is NUL-separated (-z) and carries the message as one trailing %B
+	// field: a commit message can contain 0x1E or 0x1F, and under the old delimited format either
+	// byte desynced the records -- a 0x1E split one in two, a 0x1F shifted every later field.
+	// See GitLogFormat.h.
+	//
 	// order: 0=date, 1=topo, 2=reverse-date, 3=author-date. maxCount<=0 means no limit.
-	MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount);
+	MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount,
+	                                       int* outLen);
+
+	// PACKED (Kind::Log), identical to MsGitLog, plus the commit-graph display list in the
+	// buffer's EXTRA section. Byte layout in Graph/GraphLayout.h: a u32 row count, then per row
+	// laneCount/dotLane/colorIndex/flags/segCount and that many 5-byte segments. X is a lane
+	// index, Y is in half-row units (0 top, 1 centre, 2 bottom).
+	//
+	// One export rather than two calls: laying the graph out needs each commit's parents resolved
+	// to ROW positions, and a second `git log` walk could disagree with the first if a ref moved
+	// in between -- which would draw the graph against rows that are no longer on screen.
+	MASTERSPLINTERLOGIC_API char* MsGitLogGraph(const char* root, int order, int maxCount,
+	                                            int* outLen);
 
 	// One record per ref (records separated by 0x1E, fields by 0x1F) covering refs/heads,
 	// refs/tags and refs/remotes in refname order. Always exactly 8 fields, several of which are
@@ -60,17 +77,25 @@ extern "C" {
 	//   6 head         "*" for the checked-out branch, otherwise a single space
 	//   7 symref       non-empty only for symbolic refs (e.g. refs/remotes/origin/HEAD)
 	// Empty string on error. NOTE: for-each-ref uses "%xx" hex escapes, NOT log's "%xNN".
-	MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root);
+	// PACKED (Kind::Refs). One record per ref, tagged Branch / Tag / RemoteBranch so the host
+	// buckets on a byte rather than re-testing the refs/ prefixes. See Parse/RefParser.h.
+	MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root, int* outLen);
 
 	// Tab-separated git name-status for one commit: "<status>\t<path>[\t<newPath>]" per line.
-	MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha);
+	MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha, int* outLen);
 
 	// One-line "--shortstat" summary for a commit ("N files changed, X insertions(+), Y deletions(-)").
-	MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha);
+	// PACKED (Kind::ShortStat). Exactly one record: files, insertions, deletions.
+	MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha, int* outLen);
 
-	// Unified diff text for one file in one commit (no commit header).
+	// PACKED (Kind::Diff). Unified diff for one file in one commit (no commit header), already
+	// parsed into line records -- see Packed/PackedFormat.h for the buffer layout and
+	// Parse/DiffParser.h for the record fields. *outLen holds the byte count; the payload MAY
+	// contain NULs, so copy exactly that many bytes rather than using strlen. Header flag bit 0
+	// means git reported the file as binary. nullptr only if the allocation itself failed.
 	// wsMode: 0 = honor whitespace, 1 = --ignore-space-change, 2 = --ignore-all-space.
-	MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path, int wsMode);
+	MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path,
+	                                            int wsMode, int* outLen);
 
 	// Full file content as of that commit (git show <sha>:<path>); empty if absent.
 	MASTERSPLINTERLOGIC_API char* MsGitFileAtCommit(const char* root, const char* sha, const char* path);
@@ -79,14 +104,17 @@ extern "C" {
 	// a and b may be full SHAs OR ref names (branch/tag/HEAD); git diff accepts either.
 
 	// Tab-separated name-status for the diff between a and b ("<status>\t<path>[\t<newPath>]").
-	MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b);
+	MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b,
+	                                              int* outLen);
 
 	// One-line "--shortstat" summary for the diff between a and b.
-	MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b);
+	// PACKED (Kind::ShortStat), as MsGitCommitShortStat, for a..b.
+	MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b,
+	                                                  int* outLen);
 
-	// Unified diff text for one file between a and b. wsMode as in MsGitFileDiff.
+	// PACKED (Kind::Diff), as MsGitFileDiff, for one file between a and b.
 	MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
-	                                                 const char* path, int wsMode);
+	                                                 const char* path, int wsMode, int* outLen);
 
 	// ---- Working tree status (Phase 3) ---------------------------------------------------------
 
@@ -95,13 +123,20 @@ extern "C" {
 	// "XY <path>"; when X or Y is R/C the record is followed by one extra record holding the
 	// ORIGINAL path (new path first — -z order is reversed vs the human-readable format).
 	// Untracked files appear as "?? <path>" (--untracked-files=all). Empty string on error.
-	MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root);
+	// PACKED (Kind::Status). One record per (file, section) -- a file that is both staged and
+	// modified again yields TWO, a conflicted file exactly one. See Parse/StatusParser.h.
+	//
+	// NOTE the section values match the host WorkTreeArea enum (0=staged), NOT the `area`
+	// PARAMETER of MsGitWorkTreeFileDiff below (0=unstaged). Two orderings, one word; both pinned.
+	MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root, int* outLen);
 
-	// Unified diff for one working-tree file. area: 0 = unstaged (worktree vs index),
-	// 1 = staged (index vs HEAD, --cached), 2 = untracked (--no-index vs /dev/null, i.e. the
-	// whole file as additions). wsMode as in MsGitFileDiff.
+	// PACKED (Kind::Diff), as MsGitFileDiff, for one working-tree file.
+	// area: 0 = unstaged (worktree vs index), 1 = staged (index vs HEAD, --cached),
+	// 2 = untracked (--no-index vs /dev/null, i.e. the whole file as additions).
+	// NOTE the numbering: it does NOT match the host enum's declaration order. See the trap in
+	// docs/abi.md -- casting the C# WorkTreeArea enum to int swaps staged and unstaged.
 	MASTERSPLINTERLOGIC_API char* MsGitWorkTreeFileDiff(const char* root, const char* path,
-	                                                    int area, int wsMode);
+	                                                    int area, int wsMode, int* outLen);
 
 	// Raw bytes of a file as of a commit/ref (git show <sha>:<path>), for binary/image previews.
 	// Unlike the char*-as-string returns, the payload MAY contain NUL bytes; *outLen holds the
@@ -287,7 +322,8 @@ extern "C" {
 	// Empty string when there are no stashes, and on error — an empty list either way.
 	// NOTE: dropping or popping RENUMBERS every later entry, so a selector is only valid until the
 	// next stash mutation. Callers must re-read this list after any of the three.
-	MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root);
+	// PACKED (Kind::Stash). The subject is already split into branch + message.
+	MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root, int* outLen);
 
 	// git stash push [--include-untracked] [--keep-index] [-m <message>]; "OK" / "ERR\x1f<message>".
 	// A blank `message` omits -m and lets git compose its own "WIP on <branch>" text.
@@ -308,20 +344,24 @@ extern "C" {
 	// detectMoves selects how hard git looks for moved/copied lines — a NAME, not an int:
 	//   "" | "none"  no detection      "file"    -M      (moved within this file)
 	//   "commit"     -C                "any"     -C -C   (also from files the commit created)
-	// Anything else returns ERR without spawning git.
+	// Anything else fails without spawning git.
 	//
-	// Returns "OK\x1f<raw --porcelain output>" or "ERR\x1f<message>". This read is OK/ERR-framed
-	// (unlike MsGitLog and friends) because "that path is not in that revision" is a routine,
-	// actionable failure whose message is worth keeping. Split on the FIRST 0x1F only: the payload
-	// is file content and may contain 0x1F bytes of its own.
+	// PACKED (Kind::Blame). Per-line authorship, already parsed -- see Packed/PackedFormat.h for
+	// the buffer layout and Parse/BlameParser.h for the record fields. *outLen holds the byte
+	// count; the payload MAY contain NULs, so copy exactly that many bytes.
 	//
-	// A binary file is refused with ERR rather than returned: --porcelain content lines are raw
-	// file bytes, and a NUL would truncate the whole payload at the managed marshaller.
+	// Failure travels in the buffer header (status + message) rather than as OK/ERR framing.
+	// "That path is not in that revision" is a routine, actionable failure whose message is
+	// worth keeping, which is why this read reports one at all.
+	//
+	// A binary file is still refused rather than blamed. That used to be forced by the marshaller
+	// (a NUL truncated the payload); the packed format carries NULs safely, so it is now kept
+	// because per-line authorship over binary content is noise.
 	MASTERSPLINTERLOGIC_API char* MsGitBlame(const char* root, const char* rev, const char* path,
-	                                         bool ignoreWhitespace, const char* detectMoves);
+	                                         bool ignoreWhitespace, const char* detectMoves,
+	                                         int* outLen);
 
-	// Commit search. Records are byte-identical to MsGitLog's 12-field layout, so one host-side
-	// parser serves both. `mode` picks exactly ONE git predicate — deliberately one, because git
+	// Commit search. PACKED (Kind::Log), byte-identical to MsGitLog, so one parser serves both. `mode` picks exactly ONE git predicate — deliberately one, because git
 	// ANDs --grep with --author rather than ORing them, so a combined "message or author" search
 	// would silently return the intersection:
 	//   "message"  --grep=<query>       (--fixed-strings unless useRegex)
@@ -332,13 +372,13 @@ extern "C" {
 	// `pathFilter` narrows any mode further (appended after --). matchCase=false adds
 	// --regexp-ignore-case; allBranches adds --all; `order` and `maxCount` are as in MsGitLog.
 	//
-	// Empty string — with no log walk — for: an unknown mode, a blank query AND blank pathFilter,
+	// An empty record set — with no log walk — for: an unknown mode, a blank query AND blank pathFilter,
 	// or a "hash" query that resolves to nothing (a typo must not surface as git's error text
 	// rendered into the commit list).
 	MASTERSPLINTERLOGIC_API char* MsGitSearchLog(const char* root, const char* mode,
 	                                             const char* query, const char* pathFilter,
 	                                             int order, int maxCount, bool matchCase,
-	                                             bool useRegex, bool allBranches);
+	                                             bool useRegex, bool allBranches, int* outLen);
 
 	// git reflog show [-n<maxCount>] <ref>; empty `ref` means HEAD. One record per entry (0x1E),
 	// seven 0x1F-separated fields:
@@ -347,7 +387,45 @@ extern "C" {
 	//   3 reflogSubject  "commit: <subject>" / "pull: Fast-forward" / "checkout: moving from..."
 	//   4 dateISO    5 author    6 commitSubject  (%s — often fuller than the reflog subject)
 	// A ref with no reflog makes git exit non-zero, which yields "" — an empty list, not an error.
-	MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref, int maxCount);
+	// PACKED (Kind::Reflog). The reflog subject is already split into action + detail.
+	MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref, int maxCount,
+	                                          int* outLen);
+
+	// ---- Commit graph rendering (Phase F) --------------------------------------------------------
+	//
+	// A HANDLE-BASED convention, and the only one in this ABI: everything else is stateless and
+	// takes a repository root. A renderer owns a GPU device and a swap chain, which have to live
+	// across calls, so the host holds an opaque handle instead.
+	//
+	// MsGraphCreate takes the SwapChainPanel's IUnknown*; the native side QIs ISwapChainPanelNative
+	// and does every piece of COM and D3D work itself. Returns nullptr when no device could be
+	// created, and the host then simply shows no graph.
+	//
+	// Nothing here throws, and every call tolerates a null handle, so a failed create degrades to a
+	// blank graph column rather than to a crash.
+	MASTERSPLINTERLOGIC_API void* MsGraphCreate(void* panelUnknown);
+
+	// The display list from MsGitLogGraph's extra section. Copied, so the caller may free its own.
+	MASTERSPLINTERLOGIC_API void MsGraphSetModel(void* handle, const void* displayList, int length);
+
+	// widthDip/heightDip are device-independent pixels; scrollPx is the history list's vertical
+	// offset; rowHeightPx is fixed by the host (26) and is what makes offset -> row exact; scale is
+	// the panel's composition scale.
+	MASTERSPLINTERLOGIC_API void MsGraphSetViewport(void* handle, float widthDip, float heightDip,
+	                                                double scrollPx, float rowHeightPx, float scale);
+
+	// The list colours the renderer paints rows with, as 0xAARRGGBB. It paints them at all
+	// because a WinUI 3 SwapChainPanel does NOT blend with the XAML behind it -- measured, not
+	// assumed: a fully transparent clear leaves black rather than the rows underneath.
+	MASTERSPLINTERLOGIC_API void MsGraphSetTheme(void* handle, unsigned int backgroundArgb,
+	                                             unsigned int selectedArgb);
+
+	// Which rows are selected, by index; the history list allows extended selection. Pass a null
+	// array or a zero count to clear.
+	MASTERSPLINTERLOGIC_API void MsGraphSetSelection(void* handle, const int* rows, int count);
+
+	MASTERSPLINTERLOGIC_API void MsGraphRender(void* handle);
+	MASTERSPLINTERLOGIC_API void MsGraphDestroy(void* handle);
 
 	// Frees any char* returned by the MsGit* functions above.
 	MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr);

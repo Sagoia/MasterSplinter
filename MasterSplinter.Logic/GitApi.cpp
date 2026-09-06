@@ -10,7 +10,9 @@
 #include "MasterSplinter.Logic.h"
 
 #include "Git/GitBackend.h"
+#include "Packed/PackedWriter.h"
 #include "Platform/IPlatformFactory.h"
+#include "Render/IGraphRenderer.h"
 
 #include <atomic>
 #include <cstddef>
@@ -159,6 +161,40 @@ namespace
     {
         return Call(kInternalError, sizeof(kInternalError) - 1, method, args...);
     }
+
+    // A packed call: the payload is a length-prefixed binary buffer, so it needs the explicit
+    // *outLen that MsGitFileBytesAtCommit pioneered -- strlen would stop at the first heap NUL.
+    // Status travels INSIDE the buffer (see PackedFormat.h), which is why there is no OK/ERR
+    // framing here; an exception still becomes a packed error buffer rather than a nullptr, so
+    // the host always has somewhere to read a message from.
+    template <typename Method, typename... Args>
+    char* CallPacked(int* outLen, ms::packed::Kind kind, Method method, Args... args) noexcept
+    {
+        if (outLen)
+            *outLen = 0;
+
+        std::string payload;
+        try
+        {
+            payload = (Backend().*method)(Adapt(args)...);
+        }
+        catch (...)
+        {
+            try
+            {
+                payload = ms::packed::PackedWriter::Error(kind, "The operation failed unexpectedly.");
+            }
+            catch (...)
+            {
+                return nullptr;
+            }
+        }
+
+        char* p = DupBytes(payload.data(), payload.size());
+        if (p && outLen)
+            *outLen = static_cast<int>(payload.size());
+        return p;
+    }
 }
 
 // Backend lifecycle hooks, called from MsLogicInitialize / MsLogicShutdown (MasterSplinter.Logic.cpp).
@@ -201,31 +237,39 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitOpenRepository(const char* path)
 
 // ---- History -------------------------------------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitLog(const char* root, int order, int maxCount,
+                                                  int* outLen)
 {
-    return CallRead(&ms::GitBackend::Log, root, order, maxCount);
+    return CallPacked(outLen, ms::packed::Kind::Log, &ms::GitBackend::Log, root, order, maxCount);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitLogGraph(const char* root, int order, int maxCount,
+                                                       int* outLen)
 {
-    return CallRead(&ms::GitBackend::RefDetails, root);
+    return CallPacked(outLen, ms::packed::Kind::Log, &ms::GitBackend::LogGraph, root, order, maxCount);
+}
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRefDetails(const char* root, int* outLen)
+{
+    return CallPacked(outLen, ms::packed::Kind::Refs, &ms::GitBackend::RefDetails, root);
 }
 
 // ---- Commit inspection ---------------------------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitFiles(const char* root, const char* sha, int* outLen)
 {
-    return CallRead(&ms::GitBackend::CommitFiles, root, sha);
+    return CallPacked(outLen, ms::packed::Kind::NameStatus, &ms::GitBackend::CommitFiles, root, sha);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitCommitShortStat(const char* root, const char* sha, int* outLen)
 {
-    return CallRead(&ms::GitBackend::CommitShortStat, root, sha);
+    return CallPacked(outLen, ms::packed::Kind::ShortStat, &ms::GitBackend::CommitShortStat, root, sha);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path, int wsMode)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileDiff(const char* root, const char* sha, const char* path,
+                                                       int wsMode, int* outLen)
 {
-    return CallRead(&ms::GitBackend::FileDiff, root, sha, path, wsMode);
+    return CallPacked(outLen, ms::packed::Kind::Diff, &ms::GitBackend::FileDiff, root, sha, path, wsMode);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileAtCommit(const char* root, const char* sha, const char* path)
@@ -235,33 +279,34 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileAtCommit(const char* root, con
 
 // ---- Compare two commits / refs --------------------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFiles(const char* root, const char* a, const char* b,
+                                                         int* outLen)
 {
-    return CallRead(&ms::GitBackend::RangeFiles, root, a, b);
+    return CallPacked(outLen, ms::packed::Kind::NameStatus, &ms::GitBackend::RangeFiles, root, a, b);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeShortStat(const char* root, const char* a, const char* b, int* outLen)
 {
-    return CallRead(&ms::GitBackend::RangeShortStat, root, a, b);
+    return CallPacked(outLen, ms::packed::Kind::ShortStat, &ms::GitBackend::RangeShortStat, root, a, b);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitRangeFileDiff(const char* root, const char* a, const char* b,
-                                                            const char* path, int wsMode)
+                                                            const char* path, int wsMode, int* outLen)
 {
-    return CallRead(&ms::GitBackend::RangeFileDiff, root, a, b, path, wsMode);
+    return CallPacked(outLen, ms::packed::Kind::Diff, &ms::GitBackend::RangeFileDiff, root, a, b, path, wsMode);
 }
 
 // ---- Working tree (Phase 3) ------------------------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStatus(const char* root, int* outLen)
 {
-    return CallRead(&ms::GitBackend::Status, root);
+    return CallPacked(outLen, ms::packed::Kind::Status, &ms::GitBackend::Status, root);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitWorkTreeFileDiff(const char* root, const char* path,
-                                                               int area, int wsMode)
+                                                               int area, int wsMode, int* outLen)
 {
-    return CallRead(&ms::GitBackend::WorkTreeFileDiff, root, path, area, wsMode);
+    return CallPacked(outLen, ms::packed::Kind::Diff, &ms::GitBackend::WorkTreeFileDiff, root, path, area, wsMode);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitFileBytesAtCommit(const char* root, const char* sha,
@@ -456,9 +501,9 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitRepositoryState(const char* root)
 
 // ---- Stash, blame, search, reflog (Phase 8) -------------------------------------------------
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root)
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashList(const char* root, int* outLen)
 {
-    return CallRead(&ms::GitBackend::StashList, root);
+    return CallPacked(outLen, ms::packed::Kind::Stash, &ms::GitBackend::StashList, root);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashSave(const char* root, const char* message,
@@ -484,24 +529,124 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitStashDrop(const char* root, const 
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitBlame(const char* root, const char* rev,
                                                     const char* path, bool ignoreWhitespace,
-                                                    const char* detectMoves)
+                                                    const char* detectMoves, int* outLen)
 {
-    return CallWrite(&ms::GitBackend::Blame, root, rev, path, ignoreWhitespace, detectMoves);
+    return CallPacked(outLen, ms::packed::Kind::Blame, &ms::GitBackend::Blame,
+                      root, rev, path, ignoreWhitespace, detectMoves);
 }
 
 extern "C" MASTERSPLINTERLOGIC_API char* MsGitSearchLog(const char* root, const char* mode,
                                                         const char* query, const char* pathFilter,
                                                         int order, int maxCount, bool matchCase,
-                                                        bool useRegex, bool allBranches)
+                                                        bool useRegex, bool allBranches, int* outLen)
 {
-    return CallRead(&ms::GitBackend::SearchLog, root, mode, query, pathFilter,
-                    order, maxCount, matchCase, useRegex, allBranches);
+    return CallPacked(outLen, ms::packed::Kind::Log, &ms::GitBackend::SearchLog, root, mode, query,
+                      pathFilter, order, maxCount, matchCase, useRegex, allBranches);
 }
 
-extern "C" MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref,
-                                                     int maxCount)
+
+extern "C" MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* refName,
+                                                     int maxCount, int* outLen)
 {
-    return CallRead(&ms::GitBackend::Reflog, root, ref, maxCount);
+    return CallPacked(outLen, ms::packed::Kind::Reflog, &ms::GitBackend::Reflog,
+                      root, refName, maxCount);
+}
+
+
+// ---- Commit graph rendering (Phase F) --------------------------------------------------------
+//
+// Handle-based, unlike everything else here, because a renderer owns a GPU device that has to
+// live across calls. The handle is an IGraphRenderer*; the host treats it as opaque.
+//
+// These do not use CallRead/CallWrite: those return char* and apply a string convention. What
+// they share is the rule those exist for -- nothing throws across the boundary.
+
+extern "C" MASTERSPLINTERLOGIC_API void* MsGraphCreate(void* panelUnknown)
+{
+    try
+    {
+        std::unique_ptr<ms::IPlatformFactory> factory = ms::CreatePlatformFactory();
+        std::unique_ptr<ms::render::IGraphRenderer> renderer = factory->CreateGraphRenderer();
+        if (!renderer || !renderer->Attach(panelUnknown))
+            return nullptr;
+        return renderer.release();
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphSetModel(void* handle, const void* displayList, int length)
+{
+    try
+    {
+        if (handle)
+            static_cast<ms::render::IGraphRenderer*>(handle)->SetModel(displayList, length);
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphSetViewport(void* handle, float widthDip, float heightDip,
+                                                           double scrollPx, float rowHeightPx, float scale)
+{
+    try
+    {
+        if (!handle)
+            return;
+        ms::render::Viewport viewport;
+        viewport.width = widthDip;
+        viewport.height = heightDip;
+        viewport.scrollPx = scrollPx;
+        viewport.rowHeight = rowHeightPx;
+        viewport.scale = scale > 0.0f ? scale : 1.0f;
+        static_cast<ms::render::IGraphRenderer*>(handle)->SetViewport(viewport);
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphSetTheme(void* handle, unsigned int backgroundArgb,
+                                                        unsigned int selectedArgb)
+{
+    try
+    {
+        if (!handle)
+            return;
+        ms::render::Chrome chrome;
+        chrome.background = backgroundArgb;
+        chrome.selected = selectedArgb;
+        static_cast<ms::render::IGraphRenderer*>(handle)->SetChrome(chrome);
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphSetSelection(void* handle, const int* rows, int count)
+{
+    try
+    {
+        if (handle)
+            static_cast<ms::render::IGraphRenderer*>(handle)->SetSelection(rows, count < 0 ? 0 : count);
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphRender(void* handle)
+{
+    try
+    {
+        if (handle)
+            static_cast<ms::render::IGraphRenderer*>(handle)->Render();
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphDestroy(void* handle)
+{
+    try
+    {
+        delete static_cast<ms::render::IGraphRenderer*>(handle);
+    }
+    catch (...) {}
 }
 
 extern "C" MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr)

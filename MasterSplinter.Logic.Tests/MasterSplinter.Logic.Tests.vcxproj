@@ -152,9 +152,14 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="FakeProcessRunner.h" />
+    <ClInclude Include="PackedRead.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="test.cpp" />
+    <ClCompile Include="packed_test.cpp" />
+    <ClCompile Include="parse_test.cpp" />
+    <ClCompile Include="status_parse_test.cpp" />
+    <ClCompile Include="graph_test.cpp" />
     <!-- Portable core-under-test, compiled straight in (no windows.h, so no pch). -->
     <ClCompile Include="..\MasterSplinter.Logic\Git\GitBackend.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -181,6 +186,27 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\MasterSplinter.Logic\Git\GitBackend.Blame.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Graph\GraphLayout.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Packed\PackedWriter.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Parse\BlameParser.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Parse\DiffParser.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Parse\LogParser.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Parse\RefParser.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\MasterSplinter.Logic\Parse\StatusParser.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="pch.cpp">

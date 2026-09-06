@@ -9,6 +9,11 @@
 
 #include "Git/GitBackend.h"
 #include "FakeProcessRunner.h"
+#include "PackedRead.h"
+#include "Parse/BlameParser.h"
+#include "Parse/DiffParser.h"
+#include "Parse/RefParser.h"
+#include "Parse/StatusParser.h"
 
 // Unit tests for the portable git command builder (the Bridge abstraction). Every test injects a
 // FakeProcessRunner into GitBackend, so nothing here spawns git.exe or touches a repository — the
@@ -25,21 +30,34 @@ namespace
     // 0x1E record separator (used by the for-each-ref payloads below).
     const std::string RS = std::string(1, '\x1e');
 
-    // Must match the pretty-format string in GitBackend::Log exactly.
+    // Must match the pretty-format string in GitLogFormat.h exactly, and must be preceded by the
+    // other two flags AddLogRecordFlags emits. All three are pinned because dropping any one is
+    // silently wrong rather than loudly broken: without -z a 0x1E in a commit body splits the
+    // record, without %B a 0x1F in a subject shifts every later field, and without the date
+    // format every timestamp reads as 1970.
+    const std::string ZFLAG = "-z";
+    const std::string DATEFMT = "--date=format:%z";
     const std::string FMT =
-        "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%D%x1f%s%x1f%b%x1e";
+        "--pretty=format:%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%ad%x1f%cn%x1f%ce%x1f%ct%x1f%cd%x1f%D%x1f%B";
 
     // Must match the format string in GitBackend::RefDetails exactly. Pinned here because
     // for-each-ref uses "%xx" hex escapes, not log --pretty's "%xNN" — writing %x1f would emit
     // the literal text "%x1f" and silently empty the sidebar.
     const std::string REF_FMT =
         "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(objecttype)%1f"
-        "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(HEAD)%1f%(symref)%1e";
+        "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(HEAD)%1f%(symref)%00";
 
     // Phase 8. `stash list` and `reflog show` are both log-family walks, so these use log --pretty's
     // "%xNN" escapes — NOT for-each-ref's "%xx" (see REF_FMT above).
-    const std::string STASH_FMT = "--format=%gd%x1f%H%x1f%h%x1f%gs%x1f%aI%x1f%an%x1e";
-    const std::string REFLOG_FMT = "--format=%gd%x1f%H%x1f%h%x1f%gs%x1f%aI%x1f%an%x1f%s%x1e";
+    // The free-form field (%gs) is LAST in both, and both walks pass -z: a stash message and a
+    // reflog subject are user text and can contain 0x1F, so a bounded split has to leave every
+    // stray separator inside the trailing field. Records separate on NUL, which commit data
+    // cannot contain.
+    //
+    // The offset comes from %aI rather than --date=format:%z (which the commit log uses): that
+    // option ALSO rewrites %gd, turning the selector "HEAD@{0}" into "HEAD@{+0700}".
+    const std::string STASH_FMT = "--format=%gd%x1f%H%x1f%h%x1f%at%x1f%aI%x1f%an%x1f%gs";
+    const std::string REFLOG_FMT = "--format=%gd%x1f%H%x1f%h%x1f%at%x1f%aI%x1f%an%x1f%s%x1f%gs";
 
     // A GitBackend wired to a FakeProcessRunner we retain a (non-owning) pointer to, so a test can
     // script responses and then inspect the recorded calls.
@@ -195,7 +213,8 @@ TEST(Log, DateOrderWithLimitBuildsExactArgs)
     h.fake->SetResponse("", 0);
     h.backend->Log("root", 0, 100);
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "log", "--all", "--parents", "--date-order", "-n100", FMT }));
+              (Args{ "-C", "root", "log", "--all", "--parents", "--date-order", "-n100",
+                     ZFLAG, DATEFMT, FMT }));
 }
 
 TEST(Log, TopoOrderHasNoReverse)
@@ -234,10 +253,14 @@ TEST(Log, MaxCountZeroOmitsLimit)
     EXPECT_EQ(h.fake->ArgsOf(0).back(), FMT);
 }
 
-TEST(Log, EmptyRootReturnsEmptyWithoutCallingGit)
+TEST(Log, EmptyRootReturnsNoRecordsWithoutCallingGit)
 {
+    // A well-formed but empty packed buffer, not an empty string: every exit from a packed read
+    // is a buffer the host can read uniformly.
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->Log("", 0, 100), "");
+    const mstest::PackedRead p(h.backend->Log("", 0, 100));
+    EXPECT_EQ(p.Count(), 0u);
+    EXPECT_FALSE(p.IsError());
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
@@ -261,25 +284,72 @@ TEST(RefDetails, FormatUsesForEachRefHexEscapesNotPrettyFormatOnes)
     EXPECT_EQ(REF_FMT.find("%x1f"), std::string::npos);
 }
 
-TEST(RefDetails, EmptyRootReturnsEmptyWithoutCallingGit)
+TEST(RefDetails, EmptyRootReturnsNoRecordsWithoutCallingGit)
 {
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->RefDetails(""), "");
+    EXPECT_EQ(mstest::PackedRead(h.backend->RefDetails("")).Count(), 0u);
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
-TEST(RefDetails, ReturnsRawOutputUnmodified)
+TEST(RefDetails, BranchesTagsAndRemotesAreTaggedByKind)
 {
-    // Two records: a branch with an upstream that is ahead+behind and checked out, and a tag with
-    // every optional field empty. The 8-field shape must survive byte-for-byte for the C# parser.
+    // Three records covering every shape: a branch with an upstream that is ahead+behind and
+    // checked out, an annotated tag whose peeled commit differs from its object, and a
+    // remote-tracking branch. The 8-field record shape must survive whatever is empty.
     auto h = MakeHarness();
     const std::string payload =
         "refs/heads/main" + US + "aaa" + US + "" + US + "commit" + US +
-        "origin/main" + US + "ahead 2, behind 1" + US + "*" + US + "" + RS + "\n" +
-        "refs/tags/v1" + US + "bbb" + US + "" + US + "commit" + US +
-        "" + US + "" + US + " " + US + "" + RS + "\n";
+        "origin/main" + US + "ahead 2, behind 1" + US + "*" + US + "" + std::string(1, '\0') +
+        "refs/tags/v1" + US + "tagobj" + US + "peeled" + US + "tag" + US +
+        "" + US + "" + US + " " + US + "" + std::string(1, '\0') +
+        "refs/remotes/origin/feature/x" + US + "ccc" + US + "" + US + "commit" + US +
+        "" + US + "" + US + " " + US + "" + std::string(1, '\0');
     h.fake->SetResponse(payload, 0);
-    EXPECT_EQ(h.backend->RefDetails("root"), payload);
+
+    const mstest::PackedRead p(h.backend->RefDetails("root"));
+    ASSERT_EQ(p.Count(), 3u);
+
+    EXPECT_EQ(p.RecU8(0, ms::parse::kRefOffKind),
+              static_cast<std::uint8_t>(ms::parse::RefKind::Branch));
+    EXPECT_EQ(p.RecStr(0, ms::parse::kRefOffName), "main");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kRefOffUpstream), "origin/main");
+    EXPECT_EQ(p.RecI32(0, ms::parse::kRefOffAhead), 2);
+    EXPECT_EQ(p.RecI32(0, ms::parse::kRefOffBehind), 1);
+    EXPECT_EQ(p.RecU8(0, ms::parse::kRefOffIsCurrent), 1);
+
+    EXPECT_EQ(p.RecU8(1, ms::parse::kRefOffKind),
+              static_cast<std::uint8_t>(ms::parse::RefKind::Tag));
+    EXPECT_EQ(p.RecStr(1, ms::parse::kRefOffName), "v1");
+    // %(objectname) is the tag OBJECT; %(*objectname) peels it to the commit, which is what
+    // compare and checkout need.
+    EXPECT_EQ(p.RecStr(1, ms::parse::kRefOffSha), "peeled");
+    EXPECT_EQ(p.RecU8(1, ms::parse::kRefOffIsAnnotated), 1);
+
+    EXPECT_EQ(p.RecU8(2, ms::parse::kRefOffKind),
+              static_cast<std::uint8_t>(ms::parse::RefKind::RemoteBranch));
+    EXPECT_EQ(p.RecStr(2, ms::parse::kRefOffRemote), "origin");
+    EXPECT_EQ(p.RecStr(2, ms::parse::kRefOffName), "feature/x");
+}
+
+TEST(RefDetails, SymbolicRemoteRefsAreSkipped)
+{
+    // refs/remotes/origin/HEAD is an alias for another branch; listing it would render a phantom
+    // "HEAD" leaf under the remote.
+    auto h = MakeHarness();
+    h.fake->SetResponse("refs/remotes/origin/HEAD" + US + "ccc" + US + "" + US + "commit" + US +
+                        "" + US + "" + US + " " + US + "refs/remotes/origin/main" + std::string(1, '\0'), 0);
+    EXPECT_EQ(mstest::PackedRead(h.backend->RefDetails("root")).Count(), 0u);
+}
+
+TEST(RefDetails, AGoneUpstreamIsFlagged)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("refs/heads/old" + US + "aaa" + US + "" + US + "commit" + US +
+                        "origin/old" + US + "gone" + US + " " + US + "" + std::string(1, '\0'), 0);
+
+    const mstest::PackedRead p(h.backend->RefDetails("root"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecU8(0, ms::parse::kRefOffUpstreamGone), 1);
 }
 
 TEST(RefDetails, RecordsNoStdin)
@@ -336,17 +406,24 @@ TEST(PathLists, AlwaysAskGitForNulSeparatedOutput)
 // The payload cannot travel as NULs (the managed marshaller stops at the first one), so the
 // separators are rewritten to RS. The embedded newline must survive untouched - that is the
 // whole point of -z.
-TEST(PathLists, NulSeparatorsBecomeRecordSeparators)
+TEST(PathLists, PathsWithControlCharactersSurviveTheNulStream)
 {
+    // -z is what makes a path holding a newline, quote or backslash survive: the line-based
+    // format C-quotes it, and core.quotePath=false only suppresses NON-ASCII escaping. Nothing
+    // translates NUL to 0x1E any more -- the parser reads the NUL stream directly, which is what
+    // stops a path CONTAINING 0x1E from desyncing the list.
     auto h = MakeHarness();
-    h.fake->SetResponse(std::string("A\000a\nb.txt\000", 10), 0);
+    h.fake->SetResponse(std::string("A\0a\nb.txt\0", 10), 0);
 
-    EXPECT_EQ(h.backend->CommitFiles("root", "sha"), std::string("A\036a\nb.txt\036", 10));
+    const mstest::PackedRead p(h.backend->CommitFiles("root", "sha"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kFileOffPath), "a\nb.txt");
 }
-TEST(CommitFiles, EmptyShaReturnsEmptyWithoutCallingGit)
+
+TEST(CommitFiles, EmptyShaReturnsNoRecordsWithoutCallingGit)
 {
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->CommitFiles("root", ""), "");
+    EXPECT_EQ(mstest::PackedRead(h.backend->CommitFiles("root", "")).Count(), 0u);
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
@@ -478,34 +555,74 @@ TEST(Status, BuildsPorcelainArgs)
                      "status", "--porcelain=v1", "-z", "--untracked-files=all" }));
 }
 
-TEST(Status, TranslatesNulsToRecordSeparators)
+TEST(Status, SplitsEntriesIntoTheirSections)
 {
     auto h = MakeHarness();
     const std::string raw("M  a.txt\0?? b.txt\0", 18);
     h.fake->SetResponse(raw, 0);
-    EXPECT_EQ(h.backend->Status("root"), "M  a.txt\x1e?? b.txt\x1e");
+
+    const mstest::PackedRead p(h.backend->Status("root"));
+    ASSERT_EQ(p.Count(), 2u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kFileOffPath), "a.txt");
+    EXPECT_EQ(p.RecU8(0, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Staged));
+    EXPECT_EQ(p.RecStr(1, ms::parse::kFileOffPath), "b.txt");
+    EXPECT_EQ(p.RecU8(1, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Untracked));
 }
 
-TEST(Status, RenameKeepsBothPathRecords)
+TEST(Status, RenameKeepsBothPaths)
 {
     auto h = MakeHarness();
-    // -z rename record: "R  new\0orig\0" — new path first, original second.
+    // -z rename record: "R  new\0orig\0" -- new path first, original second.
     const std::string raw("R  new.txt\0old.txt\0", 19);
     h.fake->SetResponse(raw, 0);
-    EXPECT_EQ(h.backend->Status("root"), "R  new.txt\x1eold.txt\x1e");
+
+    const mstest::PackedRead p(h.backend->Status("root"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kFileOffPath), "new.txt");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kFileOffOldPath), "old.txt");
 }
 
-TEST(Status, EmptyOnGitError)
+TEST(Status, AFileBothStagedAndModifiedAgainYieldsOneRecordPerSection)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse(std::string("MM a.txt\0", 9), 0);
+
+    const mstest::PackedRead p(h.backend->Status("root"));
+    ASSERT_EQ(p.Count(), 2u);
+    EXPECT_EQ(p.RecU8(0, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Staged));
+    EXPECT_EQ(p.RecU8(1, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Unstaged));
+}
+
+TEST(Status, AConflictedFileIsListedOnceInItsOwnSection)
+{
+    // Checked BEFORE the staged/unstaged split: both halves see a non-blank column for "UU", so
+    // without this the same conflicted file appears twice with no hint anything is wrong.
+    auto h = MakeHarness();
+    h.fake->SetResponse(std::string("UU a.txt\0", 9), 0);
+
+    const mstest::PackedRead p(h.backend->Status("root"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecU8(0, ms::parse::kFileOffSection),
+              static_cast<std::uint8_t>(ms::parse::StatusSection::Conflicted));
+}
+
+TEST(Status, NoRecordsOnGitError)
 {
     auto h = MakeHarness();
     h.fake->SetResponse("fatal: not a git repository", 128);
-    EXPECT_EQ(h.backend->Status("root"), "");
+    // RunRead, not RunRaw: a failed status must yield nothing rather than a half-payload the
+    // host would render as a clean tree.
+    EXPECT_EQ(mstest::PackedRead(h.backend->Status("root")).Count(), 0u);
 }
 
-TEST(Status, EmptyRootReturnsEmptyWithoutCallingGit)
+TEST(Status, EmptyRootReturnsNoRecordsWithoutCallingGit)
 {
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->Status(""), "");
+    EXPECT_EQ(mstest::PackedRead(h.backend->Status("")).Count(), 0u);
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
@@ -553,11 +670,15 @@ TEST(WorkTreeFileDiff, WhitespaceFlags)
 
 TEST(WorkTreeFileDiff, UntrackedReturnsOutputOnExitCode1)
 {
-    // diff --no-index exits 1 when the files differ — that is the success case here.
+    // diff --no-index exits 1 when the files differ -- that is the success case here, which is
+    // why this read uses RunRaw. Asserted through the packed payload now that the diff is parsed
+    // natively: a non-empty record set is what proves the output was not discarded as a failure.
     auto h = MakeHarness();
-    h.fake->SetResponse("diff --git a/dev/null b/n.txt\n+new line\n", 1);
-    EXPECT_EQ(h.backend->WorkTreeFileDiff("root", "n.txt", 2, 0),
-              "diff --git a/dev/null b/n.txt\n+new line\n");
+    h.fake->SetResponse("diff --git a/dev/null b/n.txt\n@@ -0,0 +1 @@\n+new line\n", 1);
+
+    const mstest::PackedRead p(h.backend->WorkTreeFileDiff("root", "n.txt", 2, 0));
+    ASSERT_EQ(p.Count(), 2u);
+    EXPECT_EQ(p.RecStr(1, ms::parse::kDiffOffText), "new line");
 }
 
 TEST(WorkTreeFileDiff, EmptyPathReturnsEmptyWithoutCallingGit)
@@ -1781,10 +1902,41 @@ TEST(RepositoryState, ErrWhenGitCannotResolveTheGitDir)
 TEST(StashList, BuildsListArgsWithTheLogFamilyFormat)
 {
     auto h = MakeHarness();
-    h.fake->SetResponse("stash@{0}" + US + "abc" + US + "abc1234" + US + "WIP on main: x" + US
-                        + "2026-08-15T10:00:00+02:00" + US + "Ada" + RS, 0);
-    EXPECT_NE(h.backend->StashList("root"), "");
-    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "stash", "list", STASH_FMT }));
+    h.fake->SetResponse("stash@{0}" + US + "abc" + US + "abc1234" + US + "1755244800" + US
+                        + "2026-08-15T10:00:00+02:00" + US + "Ada" + US + "WIP on main: x" + std::string(1, '\0'), 0);
+
+    const mstest::PackedRead p(h.backend->StashList("root"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kStashOffSelector), "stash@{0}");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kStashOffBranch), "main");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kStashOffMessage), "x");
+    EXPECT_EQ(p.RecI64(0, ms::parse::kStashOffWhen), 1755244800LL);
+    EXPECT_EQ(p.RecI32(0, ms::parse::kStashOffTz), 2 * 60);
+    EXPECT_EQ(h.fake->ArgsOf(0), (Args{ "-C", "root", "stash", "list", "-z", STASH_FMT }));
+}
+
+TEST(StashList, AUserSuppliedMessageKeepsItsOwnText)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("stash@{0}" + US + "abc" + US + "abc1234" + US + "0" + US
+                        + "" + US + "Ada" + US + "quick fix, no colon prefix" + std::string(1, '\0'), 0);
+
+    const mstest::PackedRead p(h.backend->StashList("root"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kStashOffBranch), "");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kStashOffMessage), "quick fix, no colon prefix");
+}
+
+TEST(StashList, AMessageContainingTheFieldSeparatorStaysWhole)
+{
+    // %gs is LAST precisely so this cannot shift the record.
+    auto h = MakeHarness();
+    h.fake->SetResponse("stash@{0}" + US + "abc" + US + "abc1234" + US + "0" + US
+                        + "" + US + "Ada" + US + "On main: a" + US + "b" + std::string(1, '\0'), 0);
+
+    const mstest::PackedRead p(h.backend->StashList("root"));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kStashOffMessage), "a" + US + "b");
 }
 
 TEST(StashList, EmptyWhenThereAreNoStashesOrNoRoot)
@@ -1792,8 +1944,8 @@ TEST(StashList, EmptyWhenThereAreNoStashesOrNoRoot)
     auto h = MakeHarness();
     // git prints nothing and exits 0 for an empty stash: an empty list, not a failure.
     h.fake->SetResponse("", 0);
-    EXPECT_EQ(h.backend->StashList("root"), "");
-    EXPECT_EQ(h.backend->StashList(""), "");
+    EXPECT_EQ(mstest::PackedRead(h.backend->StashList("root")).Count(), 0u);
+    EXPECT_EQ(mstest::PackedRead(h.backend->StashList("")).Count(), 0u);
     EXPECT_EQ(h.fake->CallCount(), 1u); // the blank root never reached git
 }
 
@@ -1801,9 +1953,9 @@ TEST(StashList, FailureIsNotHandedToTheRecordParser)
 {
     auto h = MakeHarness();
     // git writes diagnostics to the same merged stream the records arrive on, so a non-zero exit
-    // has to be turned into "" here — otherwise the message is parsed as if it were stash data.
+    // has to yield nothing here -- otherwise the message is parsed as if it were stash data.
     h.fake->SetResponse("fatal: not a git repository\n", 128);
-    EXPECT_EQ(h.backend->StashList("root"), "");
+    EXPECT_EQ(mstest::PackedRead(h.backend->StashList("root")).Count(), 0u);
 }
 
 TEST(StashSave, ProbesRefsStashAroundThePushAndReportsSuccess)
@@ -1901,9 +2053,13 @@ TEST(StashApplyPopDrop, ConflictArrivesAsErrCarryingGitsText)
 TEST(Blame, BuildsPorcelainArgsAndDefaultsToHead)
 {
     auto h = MakeHarness();
-    h.fake->SetResponse("abc 1 1 1\n\tline\n", 0);
-    EXPECT_EQ(h.backend->Blame("root", "", "src/a.cpp", false, ""),
-              "OK" + US + "abc 1 1 1\n\tline\n");
+    h.fake->SetResponse("abc 1 1 1\nauthor Alice\n\tline\n", 0);
+
+    const mstest::PackedRead p(h.backend->Blame("root", "", "src/a.cpp", false, ""));
+    EXPECT_FALSE(p.IsError());
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kBlameOffText), "line");
+
     // --porcelain, not --line-porcelain: the latter repeats every header on every line.
     EXPECT_EQ(h.fake->ArgsOf(0),
               (Args{ "-C", "root", "-c", "core.quotePath=false", "blame", "--porcelain",
@@ -1937,47 +2093,63 @@ TEST(Blame, MoveDetectionModesMapToTheirFlags)
 
 TEST(Blame, RejectsBadInputWithoutSpawningGit)
 {
+    // Failure travels in the packed header now, not as OK/ERR framing -- but the refusals and
+    // their messages are unchanged, and still cost no git spawn.
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->Blame("", "HEAD", "a", false, ""),
-              "ERR" + US + "No repository root was provided");
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "  ", false, ""),
-              "ERR" + US + "No file was provided");
+    auto message = [&](const std::string& packed) { return mstest::PackedRead(packed).Error(); };
+
+    EXPECT_EQ(message(h.backend->Blame("", "HEAD", "a", false, "")),
+              "No repository is open.");
+    EXPECT_EQ(message(h.backend->Blame("root", "HEAD", "  ", false, "")),
+              "No file was provided");
     // A leading '-' would be read as an option; git's --end-of-options needs 2.24, so refuse.
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "-rf", false, ""),
-              "ERR" + US + "Invalid revision or path");
-    EXPECT_EQ(h.backend->Blame("root", "--all", "a", false, ""),
-              "ERR" + US + "Invalid revision or path");
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a", false, "aggressive"),
-              "ERR" + US + "Unknown move detection mode: aggressive");
+    EXPECT_EQ(message(h.backend->Blame("root", "HEAD", "-rf", false, "")),
+              "Invalid revision or path");
+    EXPECT_EQ(message(h.backend->Blame("root", "--all", "a", false, "")),
+              "Invalid revision or path");
+    EXPECT_EQ(message(h.backend->Blame("root", "HEAD", "a", false, "aggressive")),
+              "Unknown move detection mode: aggressive");
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
 TEST(Blame, BinaryFilesAreRefusedRatherThanTruncated)
 {
     auto h = MakeHarness();
-    // A NUL anywhere in the payload would truncate the whole string at the managed marshaller,
-    // silently showing a fraction of the file as if it were all of it.
-    h.fake->SetResponse(std::string("abc 1 1 1\n\t\x00\x01binary", 21), 0);
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a.png", false, ""),
-              "ERR" + US + "This file is binary; blame is not available.");
+    // The packed format carries NULs safely, so this is no longer a transport limit -- it is kept
+    // because per-line authorship over binary content is noise, and saying so is more useful.
+    // Built rather than written as one literal: C++ hex escapes are greedy the same way C# ones
+    // are, so "\x01binary" is 0x1B followed by "inary" -- and the old explicit length read past
+    // the end of the literal.
+    std::string payload = "abc 1 1 1\n\t";
+    payload.push_back('\0');
+    payload += "binary";
+    h.fake->SetResponse(payload, 0);
+
+    const mstest::PackedRead p(h.backend->Blame("root", "HEAD", "a.png", false, ""));
+    EXPECT_TRUE(p.IsError());
+    EXPECT_EQ(p.Error(), "This file is binary; blame is not available.");
 }
 
-TEST(Blame, ErrCarriesGitsOwnMessage)
+TEST(Blame, FailureCarriesGitsOwnMessage)
 {
     auto h = MakeHarness();
     h.fake->SetResponse("fatal: no such path 'gone.txt' in HEAD\n", 128);
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "gone.txt", false, ""),
-              "ERR" + US + "fatal: no such path 'gone.txt' in HEAD");
+
+    const mstest::PackedRead p(h.backend->Blame("root", "HEAD", "gone.txt", false, ""));
+    EXPECT_TRUE(p.IsError());
+    EXPECT_EQ(p.Error(), "fatal: no such path 'gone.txt' in HEAD");
 }
 
 TEST(Blame, PayloadMayContainTheFieldSeparator)
 {
     auto h = MakeHarness();
-    // The host splits on the FIRST 0x1F only; file content that happens to contain one must
-    // survive intact rather than being read as a field boundary.
+    // File content that happens to contain 0x1F used to force the host to split on the FIRST
+    // separator only. Length prefixes remove the hazard entirely: it is just a byte.
     h.fake->SetResponse("abc 1 1 1\n\tvalue" + US + "other\n", 0);
-    EXPECT_EQ(h.backend->Blame("root", "HEAD", "a", false, ""),
-              "OK" + US + "abc 1 1 1\n\tvalue" + US + "other\n");
+
+    const mstest::PackedRead p(h.backend->Blame("root", "HEAD", "a", false, ""));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kBlameOffText), "value" + US + "other");
 }
 
 // ---- Search (Phase 8, SEARCH-001/002) ----------------------------------------------------------
@@ -1990,7 +2162,8 @@ TEST(SearchLog, MessageModeUsesGrepAndTheSameFormatAsLog)
     // drift between the two would silently mis-map fields into the wrong columns.
     EXPECT_EQ(h.fake->ArgsOf(0),
               (Args{ "-C", "root", "log", "--parents", "--date-order", "-n50",
-                     "--fixed-strings", "--grep=needle", "--regexp-ignore-case", FMT, "--" }));
+                     "--fixed-strings", "--grep=needle", "--regexp-ignore-case",
+                     ZFLAG, DATEFMT, FMT, "--" }));
 }
 
 TEST(SearchLog, RegexAndCaseAndAllBranchesAreOptIn)
@@ -2020,7 +2193,7 @@ TEST(SearchLog, AuthorContentAndPathModesEachUseOnePredicate)
     EXPECT_TRUE(h.fake->ArgsContain(2, "-Gmall.c"));
     // Path mode has no text predicate at all — the query IS the pathspec (SEARCH-002).
     EXPECT_EQ(h.fake->ArgsOf(3),
-              (Args{ "-C", "root", "log", "--parents", "--date-order", "-n10", FMT,
+              (Args{ "-C", "root", "log", "--parents", "--date-order", "-n10", ZFLAG, DATEFMT, FMT,
                      "--", "src/a.cpp" }));
 }
 
@@ -2046,7 +2219,7 @@ TEST(SearchLog, HashModeVerifiesTheRevisionBeforeWalking)
               (Args{ "-C", "root", "rev-parse", "--verify", "--quiet", "abc123^{commit}" }));
     // The resolved sha is what the walk gets, not the user's abbreviation.
     EXPECT_EQ(h.fake->ArgsOf(1),
-              (Args{ "-C", "root", "log", "--parents", "-n1", FMT, "abc123def" }));
+              (Args{ "-C", "root", "log", "--parents", "-n1", ZFLAG, DATEFMT, FMT, "abc123def" }));
 }
 
 TEST(SearchLog, HashModeYieldsEmptyForAnUnknownRevision)
@@ -2054,7 +2227,9 @@ TEST(SearchLog, HashModeYieldsEmptyForAnUnknownRevision)
     auto h = MakeHarness();
     h.fake->AddResponse("", 1);
     // A typo must come back as "no results", never as git's error text rendered into the list.
-    EXPECT_EQ(h.backend->SearchLog("root", "hash", "nope", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(mstest::PackedRead(
+                  h.backend->SearchLog("root", "hash", "nope", "", 0, 10, true, false, false)).Count(),
+              0u);
     EXPECT_EQ(h.fake->CallCount(), 1u); // no log walk after a failed probe
 }
 
@@ -2063,18 +2238,22 @@ TEST(SearchLog, RejectedPatternReadsAsNoResults)
     auto h = MakeHarness();
     // A bad regex makes git exit non-zero; its complaint must not reach the record parser.
     h.fake->SetResponse("fatal: invalid regex\n", 128);
-    EXPECT_EQ(h.backend->SearchLog("root", "message", "*[", "", 0, 10, true, true, false), "");
+    EXPECT_EQ(mstest::PackedRead(
+                  h.backend->SearchLog("root", "message", "*[", "", 0, 10, true, true, false)).Count(),
+              0u);
 }
 
 TEST(SearchLog, EmptyWithoutSpawningGitWhenThereIsNothingToSearchFor)
 {
     auto h = MakeHarness();
-    EXPECT_EQ(h.backend->SearchLog("", "message", "x", "", 0, 10, true, false, false), "");
-    EXPECT_EQ(h.backend->SearchLog("root", "subject", "x", "", 0, 10, true, false, false), "");
+    auto rows = [&](const std::string& packed) { return mstest::PackedRead(packed).Count(); };
+
+    EXPECT_EQ(rows(h.backend->SearchLog("", "message", "x", "", 0, 10, true, false, false)), 0u);
+    EXPECT_EQ(rows(h.backend->SearchLog("root", "subject", "x", "", 0, 10, true, false, false)), 0u);
     // An unfiltered walk here would look like a search that happened to match everything.
-    EXPECT_EQ(h.backend->SearchLog("root", "message", "  ", "", 0, 10, true, false, false), "");
-    EXPECT_EQ(h.backend->SearchLog("root", "hash", "", "", 0, 10, true, false, false), "");
-    EXPECT_EQ(h.backend->SearchLog("root", "hash", "-rf", "", 0, 10, true, false, false), "");
+    EXPECT_EQ(rows(h.backend->SearchLog("root", "message", "  ", "", 0, 10, true, false, false)), 0u);
+    EXPECT_EQ(rows(h.backend->SearchLog("root", "hash", "", "", 0, 10, true, false, false)), 0u);
+    EXPECT_EQ(rows(h.backend->SearchLog("root", "hash", "-rf", "", 0, 10, true, false, false)), 0u);
     EXPECT_EQ(h.fake->CallCount(), 0u);
 }
 
@@ -2083,11 +2262,48 @@ TEST(SearchLog, EmptyWithoutSpawningGitWhenThereIsNothingToSearchFor)
 TEST(Reflog, BuildsShowArgsAndDefaultsToHead)
 {
     auto h = MakeHarness();
-    h.fake->SetResponse("HEAD@{0}" + US + "abc" + US + "abc1234" + US + "commit: x" + US
-                        + "2026-08-15T10:00:00+02:00" + US + "Ada" + US + "x" + RS, 0);
-    EXPECT_NE(h.backend->Reflog("root", "", 25), "");
+    h.fake->SetResponse("HEAD@{0}" + US + "abc" + US + "abc1234" + US + "1755244800" + US
+                        + "2026-08-15T10:00:00+02:00" + US + "Ada" + US + "commit subject" + US
+                        + "commit: x" + std::string(1, '\0'), 0);
+
+    const mstest::PackedRead p(h.backend->Reflog("root", "", 25));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kReflogOffSelector), "HEAD@{0}");
+    // git packs the operation and its argument into one subject.
+    EXPECT_EQ(p.RecStr(0, ms::parse::kReflogOffAction), "commit");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kReflogOffDetail), "x");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kReflogOffSubject), "commit subject");
+    EXPECT_EQ(p.RecI64(0, ms::parse::kReflogOffWhen), 1755244800LL);
+    EXPECT_EQ(p.RecI32(0, ms::parse::kReflogOffTz), 2 * 60);
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "reflog", "show", REFLOG_FMT, "-n25", "HEAD" }));
+              (Args{ "-C", "root", "reflog", "show", "-z", REFLOG_FMT, "-n25", "HEAD" }));
+}
+
+TEST(Reflog, ASubjectWithNoColonHasNoDetail)
+{
+    auto h = MakeHarness();
+    h.fake->SetResponse("HEAD@{0}" + US + "abc" + US + "abc1234" + US + "0" + US
+                        + "" + US + "Ada" + US + "s" + US + "rebase" + std::string(1, '\0'), 0);
+
+    const mstest::PackedRead p(h.backend->Reflog("root", "", 0));
+    ASSERT_EQ(p.Count(), 1u);
+    EXPECT_EQ(p.RecStr(0, ms::parse::kReflogOffAction), "rebase");
+    EXPECT_EQ(p.RecStr(0, ms::parse::kReflogOffDetail), "");
+}
+
+TEST(Reflog, EntriesAreNumberedInWalkOrder)
+{
+    auto h = MakeHarness();
+    const std::string one = "HEAD@{0}" + US + "a" + US + "a" + US + "0" + US + "" + US + "Ada"
+                            + US + "s" + US + "commit: one" + std::string(1, '\0');
+    const std::string two = "HEAD@{1}" + US + "b" + US + "b" + US + "0" + US + "" + US + "Ada"
+                            + US + "s" + US + "commit: two" + std::string(1, '\0');
+    h.fake->SetResponse(one + two, 0);
+
+    const mstest::PackedRead p(h.backend->Reflog("root", "", 0));
+    ASSERT_EQ(p.Count(), 2u);
+    EXPECT_EQ(p.RecI32(0, ms::parse::kReflogOffIndex), 0);
+    EXPECT_EQ(p.RecI32(1, ms::parse::kReflogOffIndex), 1);
 }
 
 TEST(Reflog, TakesAnExplicitRefAndAnUnlimitedCount)
@@ -2095,7 +2311,7 @@ TEST(Reflog, TakesAnExplicitRefAndAnUnlimitedCount)
     auto h = MakeHarness();
     h.backend->Reflog("root", "refs/stash", 0);
     EXPECT_EQ(h.fake->ArgsOf(0),
-              (Args{ "-C", "root", "reflog", "show", REFLOG_FMT, "refs/stash" }));
+              (Args{ "-C", "root", "reflog", "show", "-z", REFLOG_FMT, "refs/stash" }));
 }
 
 TEST(Reflog, EmptyForARefWithNoReflogOrABadRef)
@@ -2103,10 +2319,10 @@ TEST(Reflog, EmptyForARefWithNoReflogOrABadRef)
     auto h = MakeHarness();
     // git exits non-zero for a ref that has no reflog; that degrades to an empty list, which is
     // why no .git filesystem probing is needed to keep it quiet.
-    h.fake->SetResponse("fatal: 'refs/stash' is not a valid ref\n", 128);
-    EXPECT_EQ(h.backend->Reflog("root", "refs/stash", 10), "");
-    EXPECT_EQ(h.backend->Reflog("", "HEAD", 10), "");
-    EXPECT_EQ(h.backend->Reflog("root", "--all", 10), "");
+    h.fake->SetResponse("fatal: not a valid ref\n", 128);
+    EXPECT_EQ(mstest::PackedRead(h.backend->Reflog("root", "refs/stash", 10)).Count(), 0u);
+    EXPECT_EQ(mstest::PackedRead(h.backend->Reflog("", "HEAD", 10)).Count(), 0u);
+    EXPECT_EQ(mstest::PackedRead(h.backend->Reflog("root", "--all", 10)).Count(), 0u);
     EXPECT_EQ(h.fake->CallCount(), 1u);
 }
 
@@ -2116,7 +2332,7 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
 {
     ms::GitBackend backend(nullptr);
     EXPECT_FALSE(backend.IsRepository("root"));
-    EXPECT_EQ(backend.Log("root", 0, 10), "");
+    EXPECT_EQ(mstest::PackedRead(backend.Log("root", 0, 10)).Count(), 0u);
     EXPECT_FALSE(backend.FileBytesAt("root", "sha", "f").has_value());
     EXPECT_EQ(backend.StagePaths("root", { "a" }), "ERR" + US + "git add failed");
     EXPECT_EQ(backend.StageAll("root"), "ERR" + US + "git add failed");
@@ -2124,7 +2340,7 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
     EXPECT_EQ(backend.DiscardPaths("root", { "a" }), "ERR" + US + "git restore failed");
     EXPECT_EQ(backend.Commit("root", "msg", false), "ERR" + US + "git commit failed");
     EXPECT_EQ(backend.HeadMessage("root"), "ERR" + US + "There is no commit yet");
-    EXPECT_EQ(backend.RefDetails("root"), "");
+    EXPECT_EQ(mstest::PackedRead(backend.RefDetails("root")).Count(), 0u);
     EXPECT_EQ(backend.Checkout("root", "feature", false), "ERR" + US + "git switch failed");
     EXPECT_EQ(backend.CreateBranch("root", "feature", "", false), "ERR" + US + "git branch failed");
     EXPECT_EQ(backend.DeleteBranch("root", "feature", false), "ERR" + US + "git branch failed");
@@ -2150,12 +2366,15 @@ TEST(NullRunner, DoesNotCrashAndYieldsErrorPaths)
     EXPECT_EQ(backend.MergeTool("root", "f.txt", "", {}), "ERR" + US + "git mergetool failed");
     EXPECT_EQ(backend.RepositoryState("root"),
               "ERR" + US + "The folder is not a Git repository");
-    EXPECT_EQ(backend.StashList("root"), "");
+    EXPECT_EQ(mstest::PackedRead(backend.StashList("root")).Count(), 0u);
     EXPECT_EQ(backend.StashSave("root", "wip", false, false), "ERR" + US + "git stash failed");
     EXPECT_EQ(backend.StashApply("root", ""), "ERR" + US + "git stash apply failed");
     EXPECT_EQ(backend.StashPop("root", ""), "ERR" + US + "git stash pop failed");
     EXPECT_EQ(backend.StashDrop("root", ""), "ERR" + US + "git stash drop failed");
-    EXPECT_EQ(backend.Blame("root", "HEAD", "a", false, ""), "ERR" + US + "git blame failed");
-    EXPECT_EQ(backend.SearchLog("root", "message", "x", "", 0, 10, true, false, false), "");
-    EXPECT_EQ(backend.Reflog("root", "HEAD", 10), "");
+    EXPECT_EQ(mstest::PackedRead(backend.Blame("root", "HEAD", "a", false, "")).Error(),
+              "git blame failed");
+    EXPECT_EQ(mstest::PackedRead(
+                  backend.SearchLog("root", "message", "x", "", 0, 10, true, false, false)).Count(),
+              0u);
+    EXPECT_EQ(mstest::PackedRead(backend.Reflog("root", "HEAD", 10)).Count(), 0u);
 }

@@ -94,6 +94,10 @@
     <ClCompile>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <!-- Direct2D renderer (Render/Windows). Windows-only, like the process runner. -->
+    <Link>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -196,6 +200,16 @@
     <ClInclude Include="Git\GitArgs.h" />
     <ClInclude Include="Git\GitText.h" />
     <ClInclude Include="Git\GitLogFormat.h" />
+    <ClInclude Include="Graph\GraphLayout.h" />
+    <ClInclude Include="Render\IGraphRenderer.h" />
+    <ClInclude Include="Render\Windows\D2DGraphRenderer.h" />
+    <ClInclude Include="Packed\PackedFormat.h" />
+    <ClInclude Include="Packed\PackedWriter.h" />
+    <ClInclude Include="Parse\BlameParser.h" />
+    <ClInclude Include="Parse\DiffParser.h" />
+    <ClInclude Include="Parse\LogParser.h" />
+    <ClInclude Include="Parse\RefParser.h" />
+    <ClInclude Include="Parse\StatusParser.h" />
     <ClInclude Include="Platform\IProcessRunner.h" />
     <ClInclude Include="Platform\IPlatformFactory.h" />
     <ClInclude Include="Platform\Windows\WindowsProcessRunner.h" />
@@ -208,6 +222,9 @@
          directly; everything else is portable and includes only what it needs. -->
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="Platform\Windows\WindowsProcessRunner.cpp" />
+    <!-- The SECOND translation unit allowed to include <windows.h>, via the D3D/D2D headers.
+         Same rule as the process runner: platform code lives under a Windows/ folder. -->
+    <ClCompile Include="Render\Windows\D2DGraphRenderer.cpp" />
     <!-- Portable C ABI + core (no <windows.h>). -->
     <ClCompile Include="MasterSplinter.Logic.cpp" />
     <ClCompile Include="GitApi.cpp" />
@@ -220,6 +237,13 @@
     <ClCompile Include="Git\GitBackend.Sequencer.cpp" />
     <ClCompile Include="Git\GitBackend.Stash.cpp" />
     <ClCompile Include="Git\GitBackend.Blame.cpp" />
+    <ClCompile Include="Graph\GraphLayout.cpp" />
+    <ClCompile Include="Packed\PackedWriter.cpp" />
+    <ClCompile Include="Parse\BlameParser.cpp" />
+    <ClCompile Include="Parse\DiffParser.cpp" />
+    <ClCompile Include="Parse\LogParser.cpp" />
+    <ClCompile Include="Parse\RefParser.cpp" />
+    <ClCompile Include="Parse\StatusParser.cpp" />
     <ClCompile Include="Platform\PlatformFactory.cpp" />
     <ClCompile Include="Platform\Windows\WindowsPlatformFactory.cpp" />
     <!-- macOS Adapter (Apple frameworks): built only by the macOS toolchain, never by this

@@ -13,101 +13,93 @@ namespace MasterSplinter.Entrypoint.Git
     {
         // ---- Commit history --------------------------------------------------------------------
 
-        public IReadOnlyList<CommitRow> Log(int order, int maxCount)
-            => WithGraph(ParseCommitRecords(NativeLogic.GitLog(RootPath, order, maxCount)));
+        /// <summary>
+        /// The commit-graph display list for the most recent <see cref="Log"/> call, as the
+        /// renderer consumes it. Empty until the first load.
+        /// <para>
+        /// Kept on the repository rather than threaded through the view model because the two have
+        /// the same lifetime: a refresh replaces this instance wholesale, so the graph and the rows
+        /// it describes cannot fall out of step.
+        /// </para>
+        /// </summary>
+        public byte[] GraphDisplayList { get; private set; } = Array.Empty<byte>();
 
-        /// <summary>Lays the branch graph out over a freshly parsed list. Shared by Log and
-        /// SearchLog, which produce byte-identical records and so want identical treatment.</summary>
-        private static List<CommitRow> WithGraph(List<CommitRow> commits)
+        public IReadOnlyList<CommitRow> Log(int order, int maxCount)
         {
-            CommitGraph.Assign(commits, new CommitIndex(commits));
+            // The graph rides in the same buffer as the records, laid out natively while their
+            // parents were still resolvable to row positions.
+            PackedBuffer buf = NativeLogic.GitLogGraph(RootPath, order, maxCount);
+            List<CommitRow> commits = ReadLog(buf);
+            GraphDisplayList = buf.Extra.ToArray();
             return commits;
         }
 
-        /// <summary>The 12-field commit record layout, shared by <see cref="Log"/> and
-        /// <see cref="SearchLog"/> — the native side emits one format string for both, so this is
-        /// the one place that knows the field order.</summary>
-        internal static List<CommitRow> ParseCommitRecords(string raw)
+        // ---- Reading a packed log ----------------------------------------------------------
+        //
+        // Record parsing lives in the native core now (Parse/LogParser.{h,cpp}); the layout below
+        // mirrors LogParser.h. The two tables ARE the contract, which is why both sides spell the
+        // offsets out rather than sharing a generated struct.
+
+        private const int LogOffAuthorTime = 0;
+        private const int LogOffCommitTime = 8;
+        private const int LogOffAuthorTz = 16;
+        private const int LogOffCommitTz = 20;
+        private const int LogOffFullHash = 24;
+        private const int LogOffShortHash = 32;
+        private const int LogOffParents = 40;
+        private const int LogOffAuthorName = 48;
+        private const int LogOffAuthorEmail = 56;
+        private const int LogOffCommitterName = 64;
+        private const int LogOffCommitterEmail = 72;
+        private const int LogOffBadges = 80;
+        private const int LogOffSubject = 88;
+        private const int LogOffBody = 96;
+
+        /// <summary>
+        /// Materialises packed commit records into rows.
+        /// <para>
+        /// The graph is not built here, or anywhere on this side: it is laid out natively in the
+        /// same pass and travels in the buffer's extra section, which
+        /// <see cref="GraphDisplayList"/> hands to the renderer untouched.
+        /// </para>
+        /// </summary>
+        internal static List<CommitRow> ReadLog(PackedBuffer buf)
         {
-            var commits = new List<CommitRow>();
-            foreach (string rec in raw.Split(RS))
+            int count = buf.RecordCount;
+            var commits = new List<CommitRow>(count);
+            for (int i = 0; i < count; i++)
             {
-                string record = rec.TrimStart('\n', '\r');
-                if (record.Length == 0)
-                    continue;
-
-                string[] f = record.Split(US);
-                if (f.Length < 12)
-                    continue;
-
-                var parents = f[2].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                string[] parents = buf.ArrayItems(i, LogOffParents);
                 var row = new CommitRow
                 {
-                    FullHash = f[0],
-                    Hash = f[1],
+                    FullHash = buf.Str(i, LogOffFullHash),
+                    Hash = buf.Str(i, LogOffShortHash),
                     ParentHashes = parents,
-                    Parents = parents.Length == 0
-                        ? "—"
-                        : string.Join(", ", parents.Select(Short)),
-                    Author = f[3],
-                    AuthorEmail = f[4],
-                    AuthorDate = ParseDate(f[5]),
-                    Committer = f[6],
-                    CommitterEmail = f[7],
-                    CommitDate = ParseDate(f[8]),
-                    Message = f[10],
-                    Body = f[11].TrimEnd('\n', '\r'),
+                    Parents = parents.Length == 0 ? "—" : string.Join(", ", parents.Select(Short)),
+                    Author = buf.Str(i, LogOffAuthorName),
+                    AuthorEmail = buf.Str(i, LogOffAuthorEmail),
+                    AuthorDate = FromUnixWithOffset(buf.I64(i, LogOffAuthorTime),
+                                                    buf.I32(i, LogOffAuthorTz)),
+                    Committer = buf.Str(i, LogOffCommitterName),
+                    CommitterEmail = buf.Str(i, LogOffCommitterEmail),
+                    CommitDate = FromUnixWithOffset(buf.I64(i, LogOffCommitTime),
+                                                    buf.I32(i, LogOffCommitTz)),
+                    Message = buf.Str(i, LogOffSubject),
+                    Body = buf.Str(i, LogOffBody),
                 };
                 row.Date = FormatDate(row.AuthorDate);
                 row.CommitterDate = FormatDate(row.CommitDate);
-                foreach (var badge in ParseDecorations(f[9]))
-                    row.Badges.Add(badge);
+
+                int badges = buf.ArrayCount(i, LogOffBadges);
+                for (int b = 0; b < badges; b++)
+                {
+                    (uint kind, string text) = buf.TaggedItem(i, LogOffBadges, b);
+                    row.Badges.Add(new Badge { Kind = (BadgeKind)kind, Text = text });
+                }
+
                 commits.Add(row);
             }
-            // The graph is NOT assigned here. Lane layout is cross-row by nature — where a commit
-            // sits depends on its children — so it belongs to the whole list, not to record
-            // parsing. See CommitGraph.
             return commits;
-        }
-
-        internal static IEnumerable<Badge> ParseDecorations(string decorations)
-        {
-            if (string.IsNullOrWhiteSpace(decorations))
-                yield break;
-
-            foreach (string rawToken in decorations.Split(','))
-            {
-                string token = rawToken.Trim();
-                if (token.Length == 0)
-                    continue;
-
-                if (token.StartsWith("tag:", StringComparison.Ordinal))
-                {
-                    yield return new Badge { Kind = BadgeKind.Tag, Text = token["tag:".Length..].Trim() };
-                }
-                else if (token.Contains("->"))
-                {
-                    // "HEAD -> main": HEAD pointer plus the local branch it points at.
-                    int arrow = token.IndexOf("->", StringComparison.Ordinal);
-                    string left = token[..arrow].Trim();
-                    string right = token[(arrow + 2)..].Trim();
-                    yield return new Badge { Kind = BadgeKind.Head, Text = left };
-                    if (right.Length > 0)
-                        yield return new Badge { Kind = BadgeKind.LocalBranch, Text = right };
-                }
-                else if (token == "HEAD")
-                {
-                    yield return new Badge { Kind = BadgeKind.Head, Text = "HEAD" };
-                }
-                else if (token.Contains('/'))
-                {
-                    yield return new Badge { Kind = BadgeKind.RemoteBranch, Text = token };
-                }
-                else
-                {
-                    yield return new Badge { Kind = BadgeKind.LocalBranch, Text = token };
-                }
-            }
         }
 
         // ---- Refs (sidebar) --------------------------------------------------------------------
@@ -115,66 +107,64 @@ namespace MasterSplinter.Entrypoint.Git
         public sealed record RefList(List<BranchInfo> Branches, List<TagInfo> Tags,
                                      List<RemoteBranchInfo> Remotes);
 
-        // "ahead 2, behind 1" from %(upstream:track,nobracket). Anything unrecognized leaves the
-        // counts at 0 — a branch then simply shows no arrows, never a wrong number.
-        private static readonly Regex AheadRe = new(@"ahead (\d+)", RegexOptions.Compiled);
-        private static readonly Regex BehindRe = new(@"behind (\d+)", RegexOptions.Compiled);
+        // Record layout, mirroring Parse/RefParser.h.
+        private const int RefOffKind = 0;
+        private const int RefOffIsCurrent = 1;
+        private const int RefOffUpstreamGone = 2;
+        private const int RefOffIsAnnotated = 3;
+        private const int RefOffAhead = 4;
+        private const int RefOffBehind = 8;
+        private const int RefOffRefName = 12;
+        private const int RefOffName = 20;
+        private const int RefOffSha = 28;
+        private const int RefOffUpstream = 36;
+        private const int RefOffRemote = 44;
+
+        private const byte RefKindBranch = 0;
+        private const byte RefKindTag = 1;
+        private const byte RefKindRemoteBranch = 2;
 
         /// <summary>Local branches, tags and remote-tracking branches in one pass (BR-001, BR-002,
-        /// TAG-001). See MasterSplinter.Logic.h for the 8-field record layout.</summary>
+        /// TAG-001). Parsing lives in Parse/RefParser.cpp; each record is tagged with its kind, so
+        /// this is bucketing rather than prefix-testing.</summary>
         public RefList ListRefs()
         {
-            string raw = NativeLogic.GitRefDetails(RootPath);
+            PackedBuffer buf = NativeLogic.GitRefDetails(RootPath);
             var branches = new List<BranchInfo>();
             var tags = new List<TagInfo>();
             var remotes = new List<RemoteBranchInfo>();
 
-            foreach (string rec in raw.Split(RS))
+            for (int i = 0; i < buf.RecordCount; i++)
             {
-                // git writes a newline after each record's RS terminator.
-                string r = rec.Trim('\n', '\r');
-                if (r.Length == 0)
-                    continue;
-                string[] f = r.Split(US);
-                if (f.Length < 8)
-                    continue;
+                switch (buf.U8(i, RefOffKind))
+                {
+                    case RefKindBranch:
+                        branches.Add(new BranchInfo(
+                            buf.Str(i, RefOffRefName),
+                            buf.Str(i, RefOffName),
+                            buf.Str(i, RefOffSha),
+                            buf.Str(i, RefOffUpstream),
+                            buf.I32(i, RefOffAhead),
+                            buf.I32(i, RefOffBehind),
+                            buf.U8(i, RefOffUpstreamGone) != 0,
+                            buf.U8(i, RefOffIsCurrent) != 0));
+                        break;
 
-                string refName = f[0];
-                if (refName.StartsWith("refs/heads/", StringComparison.Ordinal))
-                {
-                    string track = f[5];
-                    branches.Add(new BranchInfo(
-                        refName,
-                        refName["refs/heads/".Length..],
-                        f[1],
-                        f[4],
-                        MatchInt(AheadRe, track),
-                        MatchInt(BehindRe, track),
-                        track == "gone",
-                        f[6].Trim() == "*"));
-                }
-                else if (refName.StartsWith("refs/tags/", StringComparison.Ordinal))
-                {
-                    // %(objectname) is the tag OBJECT for an annotated tag; %(*objectname) peels
-                    // it to the commit, which is what compare/checkout need.
-                    tags.Add(new TagInfo(
-                        refName,
-                        refName["refs/tags/".Length..],
-                        f[2].Length > 0 ? f[2] : f[1],
-                        f[3] == "tag"));
-                }
-                else if (refName.StartsWith("refs/remotes/", StringComparison.Ordinal))
-                {
-                    // Skip symbolic refs: refs/remotes/origin/HEAD is an alias for another branch
-                    // and would otherwise render as a phantom "HEAD" leaf under the remote.
-                    if (f[7].Length > 0)
-                        continue;
-                    string shortName = refName["refs/remotes/".Length..];
-                    int slash = shortName.IndexOf('/');
-                    if (slash < 0)
-                        continue;
-                    remotes.Add(new RemoteBranchInfo(refName, shortName[..slash],
-                                                     shortName[(slash + 1)..], f[1]));
+                    case RefKindTag:
+                        tags.Add(new TagInfo(
+                            buf.Str(i, RefOffRefName),
+                            buf.Str(i, RefOffName),
+                            buf.Str(i, RefOffSha),
+                            buf.U8(i, RefOffIsAnnotated) != 0));
+                        break;
+
+                    case RefKindRemoteBranch:
+                        remotes.Add(new RemoteBranchInfo(
+                            buf.Str(i, RefOffRefName),
+                            buf.Str(i, RefOffRemote),
+                            buf.Str(i, RefOffName),
+                            buf.Str(i, RefOffSha)));
+                        break;
                 }
             }
             return new RefList(branches, tags, remotes);
@@ -197,12 +187,17 @@ namespace MasterSplinter.Entrypoint.Git
         /// commit list, detail pane and diff viewer all work on the results unchanged.
         /// An empty list means "no matches" — including for a query git rejected.
         /// </summary>
+        /// <remarks>
+        /// Deliberately no graph column. Search results are a filtered subset, so almost every
+        /// parent lies outside them; lanes drawn between them would describe a history that is not
+        /// the one being shown. The placeholder used to draw one blue lane per row here, which was
+        /// equally meaningless and looked authoritative.
+        /// </remarks>
         public IReadOnlyList<CommitRow> SearchLog(SearchMode mode, string query, string pathFilter,
                                                   int order, int maxCount, bool matchCase,
                                                   bool useRegex, bool allBranches)
-            => WithGraph(ParseCommitRecords(NativeLogic.GitSearchLog(RootPath, SearchModeArg(mode), query,
-                                                            pathFilter, order, maxCount, matchCase,
-                                                            useRegex, allBranches)));
+            => ReadLog(NativeLogic.GitSearchLog(RootPath, SearchModeArg(mode), query, pathFilter,
+                                               order, maxCount, matchCase, useRegex, allBranches));
 
         /// <summary>
         /// One commit by sha (full or abbreviated), or null if it does not resolve. Used by the
@@ -218,29 +213,35 @@ namespace MasterSplinter.Entrypoint.Git
         /// Where a ref has been (REFLOG-001); empty <paramref name="refName"/> means HEAD. Empty
         /// when the ref has no reflog at all, which is an ordinary state rather than an error.
         /// </summary>
+        // Record layout, mirroring Parse/RefParser.h.
+        private const int ReflogOffWhen = 0;
+        private const int ReflogOffTz = 8;
+        private const int ReflogOffIndex = 12;
+        private const int ReflogOffSelector = 16;
+        private const int ReflogOffSha = 24;
+        private const int ReflogOffShortSha = 32;
+        private const int ReflogOffAction = 40;
+        private const int ReflogOffDetail = 48;
+        private const int ReflogOffSubject = 56;
+        private const int ReflogOffAuthor = 64;
+
         public IReadOnlyList<ReflogEntry> Reflog(string refName, int maxCount)
         {
-            string raw = NativeLogic.GitReflog(RootPath, refName, maxCount);
-            var entries = new List<ReflogEntry>();
-            int index = 0;
-            foreach (string rec in raw.Split(RS))
+            // The reflog subject arrives already split into action + detail.
+            PackedBuffer buf = NativeLogic.GitReflog(RootPath, refName, maxCount);
+            var entries = new List<ReflogEntry>(buf.RecordCount);
+            for (int i = 0; i < buf.RecordCount; i++)
             {
-                string r = rec.Trim('\n', '\r');
-                if (r.Length == 0)
-                    continue;
-                string[] f = r.Split(US);
-                if (f.Length < 7)
-                    continue;
-
-                // git packs the operation and its argument into one subject:
-                // "checkout: moving from main to feature" -> ("checkout", "moving from ...").
-                string subject = f[3];
-                int colon = subject.IndexOf(": ", StringComparison.Ordinal);
-                string action = colon > 0 ? subject[..colon] : subject;
-                string detail = colon > 0 ? subject[(colon + 2)..] : "";
-
-                entries.Add(new ReflogEntry(index++, f[0], f[1], f[2], action, detail, f[6],
-                                            ParseDate(f[4]), f[5]));
+                entries.Add(new ReflogEntry(
+                    buf.I32(i, ReflogOffIndex),
+                    buf.Str(i, ReflogOffSelector),
+                    buf.Str(i, ReflogOffSha),
+                    buf.Str(i, ReflogOffShortSha),
+                    buf.Str(i, ReflogOffAction),
+                    buf.Str(i, ReflogOffDetail),
+                    buf.Str(i, ReflogOffSubject),
+                    FromUnixWithOffset(buf.I64(i, ReflogOffWhen), buf.I32(i, ReflogOffTz)),
+                    buf.Str(i, ReflogOffAuthor)));
             }
             return entries;
         }

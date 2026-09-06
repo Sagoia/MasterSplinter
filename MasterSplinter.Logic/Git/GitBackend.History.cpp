@@ -8,6 +8,9 @@
 
 #include "GitBackend.h"
 #include "GitText.h"
+
+#include "../Parse/LogParser.h"
+#include "../Parse/RefParser.h"
 #include "GitLogFormat.h"
 
 namespace ms
@@ -60,27 +63,48 @@ namespace ms
     std::string GitBackend::Log(const std::string& root, int order, int maxCount) const
     {
         if (root.empty())
-            return std::string();
+            return parse::ParseLogRecords("");
 
         bool reverse = false;
         const char* orderFlag = LogOrderFlag(order, reverse);
 
-        // Exit code deliberately ignored: the host's field-count floor drops anything that is not
-        // a well-formed record, so git's error text can never reach the commit list.
-        return RunRaw(root, GitArgs{ "log", "--all", "--parents" }
-            .Add(orderFlag)
+        GitArgs args{ "log", "--all", "--parents" };
+        args.Add(orderFlag)
             .AddIf(reverse, "--reverse")
-            .AddIf(maxCount > 0, "-n" + std::to_string(maxCount))
-            .Add(kLogFormat));
+            .AddIf(maxCount > 0, "-n" + std::to_string(maxCount));
+        AddLogRecordFlags(args);
+
+        // Exit code deliberately ignored: the field-count floor in Parse/LogParser drops anything
+        // that is not a well-formed record, so git's error text can never reach the commit list.
+        return parse::ParseLogRecords(RunRaw(root, std::move(args)));
+    }
+
+    std::string GitBackend::LogGraph(const std::string& root, int order, int maxCount) const
+    {
+        if (root.empty())
+            return parse::ParseLogRecordsWithGraph("");
+
+        bool reverse = false;
+        const char* orderFlag = LogOrderFlag(order, reverse);
+
+        GitArgs args{ "log", "--all", "--parents" };
+        args.Add(orderFlag)
+            .AddIf(reverse, "--reverse")
+            .AddIf(maxCount > 0, "-n" + std::to_string(maxCount));
+        AddLogRecordFlags(args);
+
+        // Same argv as Log, deliberately: the two must be interchangeable, so the only difference
+        // is whether the graph section is computed.
+        return parse::ParseLogRecordsWithGraph(RunRaw(root, std::move(args)), reverse);
     }
 
     std::string GitBackend::RefDetails(const std::string& root) const
     {
         if (root.empty())
-            return std::string();
-        // Eight fixed fields per ref, US-separated, RS-terminated (git adds a newline after each
-        // record, which the C# splitter trims). The field COUNT is constant even when several
-        // fields are empty, so positional parsing stays stable.
+            return parse::ParseRefDetails("");
+        // Eight fixed fields per ref, US-separated, NUL-terminated (git adds a newline after each
+        // record, which the parser trims). The field COUNT is constant even when several fields
+        // are empty, so positional parsing stays stable.
         //
         // GOTCHA: for-each-ref escapes are "%xx" (two hex digits) -- NOT log --pretty's "%xNN".
         // Writing %x1f here emits the literal text "%x1f". The exact-argv gtest pins this.
@@ -90,10 +114,10 @@ namespace ms
         // each branch against its own upstream. Per-branch rev-list would be N spawns per refresh.
         const std::string fmt =
             "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(objecttype)%1f"
-            "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(HEAD)%1f%(symref)%1e";
-        return RunRaw(root, GitArgs{ "for-each-ref", "--sort=refname" }
+            "%(upstream:short)%1f%(upstream:track,nobracket)%1f%(HEAD)%1f%(symref)%00";
+        return parse::ParseRefDetails(RunRaw(root, GitArgs{ "for-each-ref", "--sort=refname" }
             .Add(fmt)
-            .Add({ "refs/heads", "refs/tags", "refs/remotes" }));
+            .Add({ "refs/heads", "refs/tags", "refs/remotes" })));
     }
 
     std::string GitBackend::SearchLog(const std::string& root, const std::string& mode,
@@ -101,32 +125,36 @@ namespace ms
                                       int order, int maxCount, bool matchCase, bool useRegex,
                                       bool allBranches) const
     {
+        // Every exit is a well-formed (possibly empty) packed buffer, so the host reads one shape.
         if (root.empty())
-            return std::string();
+            return parse::ParseLogRecords("");
 
         const std::vector<std::string> modes = { "message", "author", "content", "path", "hash" };
         if (!Contains(modes, mode))
-            return std::string();
+            return parse::ParseLogRecords("");
 
         const bool hasQuery = !IsBlank(query);
         const bool hasPath = !IsBlank(pathFilter);
         // Nothing to search for: an unfiltered `git log` here would look like a successful search
         // that happened to match everything.
         if (!hasQuery && !hasPath)
-            return std::string();
+            return parse::ParseLogRecords("");
 
         // A hash is resolved, not matched: verify it names a commit first so a typo comes back as
         // an empty result rather than git's "unknown revision" text rendered as a commit list.
         if (mode == "hash")
         {
             if (!hasQuery || LooksLikeOption(query))
-                return std::string();
+                return parse::ParseLogRecords("");
             bool resolved = false;
             std::string sha = RunValue(root,
                 GitArgs{ "rev-parse", "--verify", "--quiet" }.Add(query + "^{commit}"), resolved);
             if (!resolved || sha.empty())
-                return std::string();
-            return RunRead(root, GitArgs{ "log", "--parents", "-n1" }.Add(kLogFormat).Add(sha));
+                return parse::ParseLogRecords("");
+
+            GitArgs one{ "log", "--parents", "-n1" };
+            AddLogRecordFlags(one).Add(sha);
+            return parse::ParseLogRecords(RunRead(root, std::move(one)));
         }
 
         bool reverse = false;
@@ -156,8 +184,8 @@ namespace ms
             args.Add((useRegex ? "-G" : "-S") + query);
         }
 
-        args.AddIf(!matchCase, "--regexp-ignore-case")
-            .Add(kLogFormat)
+        args.AddIf(!matchCase, "--regexp-ignore-case");
+        AddLogRecordFlags(args)
             .Separator()
             // In "path" mode the query IS the pathspec (SEARCH-002); any mode may additionally be
             // narrowed by an explicit path filter.
@@ -166,29 +194,37 @@ namespace ms
 
         // A rejected pattern (bad regex, unknown pathspec magic) must read as "no results", not as
         // git's complaint fed to the record parser — hence RunRead, not RunRaw.
-        return RunRead(root, std::move(args));
+        return parse::ParseLogRecords(RunRead(root, std::move(args)));
     }
 
     std::string GitBackend::Reflog(const std::string& root, const std::string& ref,
                                    int maxCount) const
     {
         if (root.empty())
-            return std::string();
+            return parse::ParseReflog("");
         if (LooksLikeOption(ref))
-            return std::string();
+            return parse::ParseReflog("");
 
-        // %gd selector, %H/%h the commit, %gs the reflog subject ("commit: <subject>",
-        // "pull: Fast-forward"), %aI/%an the commit's author, %s the commit subject — the reflog
-        // subject is often terser than the commit's own.
+        // %gd selector, %H/%h the commit, %at/%aI the author time and its offset, %an the author,
+        // %s the commit subject, %gs the reflog subject ("commit: <subject>", "pull: Fast-forward")
+        // -- which is often terser than the commit's own.
+        //
+        // -z, and the two free-form fields LAST: a reflog subject is user text and can contain
+        // 0x1F. NUL separation makes a record boundary unmissable, and the bounded field split
+        // keeps any stray separator inside %gs. %s is the one field a 0x1F could still shift into
+        // %gs; the damage is then one row, never the stream.
+        //
+        // NOT --date=format:%z (which the commit log uses): that option also rewrites %gd, so the
+        // selector "HEAD@{0}" comes back as "HEAD@{+0700}". The offset is read off %aI instead.
         //
         // A ref with no reflog makes git exit non-zero; the ""-on-error path already degrades to an
         // empty list, so no filesystem probing is needed to keep that quiet.
         // Checked, not assumed (RunRead): "not a valid ref" is the ORDINARY answer for refs/stash
         // in a repo that has never stashed, and it arrives on the same merged stream as the
         // records would.
-        return RunRead(root, GitArgs{ "reflog", "show",
-                                      "--format=%gd%x1f%H%x1f%h%x1f%gs%x1f%aI%x1f%an%x1f%s%x1e" }
+        return parse::ParseReflog(RunRead(root, GitArgs{ "reflog", "show", "-z",
+                                      "--format=%gd%x1f%H%x1f%h%x1f%at%x1f%aI%x1f%an%x1f%s%x1f%gs" }
             .AddIf(maxCount > 0, "-n" + std::to_string(maxCount))
-            .Add(ref.empty() ? "HEAD" : ref));
+            .Add(ref.empty() ? "HEAD" : ref)));
     }
 }

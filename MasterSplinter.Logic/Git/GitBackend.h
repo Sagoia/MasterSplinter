@@ -39,9 +39,16 @@ namespace ms
         bool IsRepository(const std::string& path) const;
         std::string OpenRepository(const std::string& path) const;
         std::string Log(const std::string& root, int order, int maxCount) const;
+        // Log plus the commit-graph display list, in the packed buffer's extra section. One
+        // spawn: a second walk could disagree with the first if a ref moved between them, and
+        // the graph would then be laid out over rows that are no longer the ones on screen.
+        std::string LogGraph(const std::string& root, int order, int maxCount) const;
         std::string RefDetails(const std::string& root) const;
         std::string CommitFiles(const std::string& root, const std::string& sha) const;
         std::string CommitShortStat(const std::string& root, const std::string& sha) const;
+        // The three unified-diff reads return a PACKED buffer (Packed/PackedFormat.h,
+        // Kind::Diff), not patch text: parsing moved into Parse/DiffParser so the line
+        // text crosses the ABI length-prefixed. Their exports publish an explicit length.
         std::string FileDiff(const std::string& root, const std::string& sha,
                              const std::string& path, int wsMode) const;
         std::string FileAtCommit(const std::string& root, const std::string& sha,

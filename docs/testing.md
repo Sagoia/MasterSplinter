@@ -5,9 +5,15 @@ The third deliberately is not: it exists to check the assumptions the other two 
 
 | Suite | Covers | Runner |
 |---|---|---|
-| `MasterSplinter.Logic.Tests` (Google Test) | The C++ core: **188 cases / 50 suites** | `MasterSplinter.Logic.Tests.exe` |
-| `MasterSplinter.Core.Tests` (xunit) | The C# parsers, ABI contracts and extracted policy: **213 cases** | `dotnet test` |
-| `EndToEndSmokeTests` (in the same xunit project) | The real native DLL + real git against a scratch repo: **14 cases** | `dotnet test` |
+| `MasterSplinter.Logic.Tests` (Google Test) | The C++ core - command building, the git-output parsers, the packed wire format, and the graph layout: **307 cases / 65 suites** | `MasterSplinter.Logic.Tests.exe` |
+| `MasterSplinter.Core.Tests` (xunit) | The host: packed unpacking, ABI contracts and extracted policy: **224 cases** | `dotnet test` |
+| `EndToEndSmokeTests` (in the same xunit project) | The real native DLL + real git against a scratch repo: **17 cases** | `dotnet test` |
+
+**Phase D moved the parsers, and the coverage moved with them.** Every xunit file it deleted was
+replaced by gtest cases in the same commit, usually with a few more: `RecordParserTests`,
+`UnifiedDiffParserTests` and `PorcelainBlameParserTests` are gone, and `parse_test.cpp` /
+`status_parse_test.cpp` hold their successors. What stayed on the host is *unpacking* - the
+`*UnpackTests` files - plus all the policy that was never parsing in the first place.
 
 All run in CI on every push, on an `x64` + `ARM64` matrix.
 
@@ -30,8 +36,9 @@ MasterSplinter.Logic.Tests\ARM64\Debug\MasterSplinter.Logic.Tests.exe
 ```
 
 Running the Debug build needs the debug CRT on `PATH`. Match the build architecture to the machine. The test
-project compiles the `GitBackend*.cpp` sources directly rather than linking the DLL, so **adding a new
-`GitBackend.<Area>.cpp` means adding it to both `.vcxproj` files**, not just the Logic one.
+project compiles the core sources directly rather than linking the DLL, so **adding a new
+`GitBackend.<Area>.cpp`, `Parse/*.cpp` or `Packed/*.cpp` means adding it to both `.vcxproj` files**, not
+just the Logic one, with `<PrecompiledHeader>NotUsing</PrecompiledHeader>`.
 
 ### `FakeProcessRunner`
 
@@ -46,6 +53,18 @@ A hand-written double, no mocking framework:
   so cancellation is testable without a real process.
 - Helpers: `CallCount`, `ArgsOf(i)`, `InputOf(i)`, `EnvOf(i, name)`, `ArgsContain(i, flag)`, `HadSink(i)`,
   `SinkCancelled(i)`.
+
+### The packed format and the parsers
+
+`packed_test.cpp` reads the wire format with its own inline little-endian helpers, deliberately NOT
+through `PackedRead.h`: if the writer and the reader shared a mistake it would cancel out and the suite
+would stay green while the real boundary broke. `PackedBufferTests.cs` does the same on the host,
+assembling buffers by hand from the documented offsets. Those two files are the pin; everything
+downstream uses the shared readers, because by then the format itself is already fixed.
+
+The parser suites (`parse_test.cpp`, `status_parse_test.cpp`) feed each parser sample git output and
+assert the records that come back. They need no `FakeProcessRunner` at all - a parser is a free function
+over a string, touching neither git nor the process runner.
 
 ### Two kinds of test
 
@@ -80,17 +99,20 @@ dotnet test MasterSplinter.Core.Tests/MasterSplinter.Core.Tests.csproj -p:Platfo
 test host — no Windows App SDK runtime, no packaged identity. The parsers are `internal` (they are
 `GitRepository` implementation detail, not UI-facing API) and reached via `InternalsVisibleTo`.
 
-What is covered, and why each earns its place:
+What is covered, and why each earns its place. Rows struck through were moved to the native suite by
+Phase D and are kept here because the *reason* they exist has not changed - only the file has:
 
 | Area | Why it is pinned |
 |---|---|
-| `ParseUnifiedDiff` | Combined `@@@` diffs — a conflicted file's diff rendered *empty* before this was handled. Plus the trailing-newline artifact below. |
-| `ParsePorcelainBlame` | git emits the author block only on a commit's **first** group; later groups carry the sha alone. Without per-sha caching most lines render with a blank author — correctness, not optimisation. |
-| `AreaFlag` / `WsFlag` | The ABI takes 0=unstaged, 1=staged, but the C# enum declares Staged first, so casting the enum swaps them. This shipped once. One test asserts the mapping is *not* a plain cast. |
-| `IsUnmerged` | All seven unmerged XY pairs, matched before the staged/unstaged split — otherwise a `UU` file is listed twice. |
+| ~~`ParseUnifiedDiff`~~ (now native) | Combined `@@@` diffs — a conflicted file's diff rendered *empty* before this was handled. Plus the trailing-newline artifact below. |
+| ~~`ParsePorcelainBlame`~~ (now native) | git emits the author block only on a commit's **first** group; later groups carry the sha alone. Without per-sha caching most lines render with a blank author — correctness, not optimisation. |
+| `AreaFlag` / `WsFlag` | The ABI *parameter* takes 0=unstaged, 1=staged, but the C# enum declares Staged first, so casting the enum swaps them. This shipped once. One test asserts the mapping is *not* a plain cast - and another that the packed status record deliberately uses the *other* ordering. |
+| `PackedBuffer` | The wire format, read from hand-built bytes rather than from the native writer, so a layout mistake cannot cancel itself out. Also that a malformed buffer degrades to inert instead of throwing. |
+| The `*UnpackTests` | One per packed record layout. In particular: every enum whose value crosses the ABI as an integer (`DiffLineKind`, `FileChangeStatus`, `WorkTreeArea`, `BadgeKind`) still matches its C++ twin in declaration order. Reordering either side alone is otherwise silent. |
+| ~~`IsUnmerged`~~ (now native) | All seven unmerged XY pairs, matched before the staged/unstaged split — otherwise a `UU` file is listed twice. |
 | `NormalizeMessage` | A WinUI `TextBox` reports line breaks as a bare CR. |
 | `ParseOkErr` | Splits on the **first** separator only, so git text containing `0x1F` survives. |
-| `ParseCommitRecords` | The 12-field floor is what keeps git's error text off the commit list. |
+| ~~`ParseCommitRecords`~~ (now native) | The field-count floor is what keeps git's error text off the commit list. |
 | `SideBySideBuilder` | Positional pairing of removed/added runs, and the one-sided filler rows. |
 | `GitOperationRunner` | The refresh policy. A conflicting stash pop changes the working tree *and* exits non-zero, so treating failure as "nothing changed" showed a stale tree — pinned by a regression test. |
 | `CommitOrdering` | git cherry-pick applies its arguments left to right, so the order is a correctness requirement. Dates are deliberately ignored: they tie, and rebases reorder them. |
@@ -108,7 +130,8 @@ What is covered, and why each earns its place:
 > character U+01FF rather than US followed by `f`. `\u` is fixed-width and cannot do that. (Same family as the
 > `for-each-ref` `%xx` vs `log` `%xNN` trap in [abi.md](abi.md).)
 
-**A bug these tests found on their first run:** `ParseUnifiedDiff` emitted a phantom blank context line,
+**A bug these tests found on their first run** (the parser has since moved to
+`Parse/DiffParser.cpp`, and so has this test): `ParseUnifiedDiff` emitted a phantom blank context line,
 carrying a line number, at the end of *every* diff. Splitting on newlines leaves an empty tail after git's
 final newline, and the parser treated it as content. Verified against real git that a genuinely blank context
 line always arrives as a single space (git writes the marker column), so a zero-length line inside a hunk can
@@ -127,11 +150,30 @@ resolves now that `NativeLogic` lives in its own assembly — a class of breakag
 Skips itself (rather than failing) when git or the native DLL is unavailable, so a machine without them
 still gets a green unit run. CI builds the native core before the managed test step so these run there.
 
+## The commit graph
+
+`GraphLayout` is pure integer logic, so its 19 cases need no `FakeProcessRunner` at all: they feed
+adjacency lists directly. They cover the shapes that actually go wrong - straight line, fork,
+octopus, criss-cross, orphan roots, `--all` with disjoint roots, lane reuse after a branch ends,
+and stability when the window truncates parents - plus the display list's own invariants (nothing
+drawn outside a row's laneCount, every colour in range).
+
+`TheCommitGraphIsLaidOutOverRealHistory` decodes the display list byte for byte against the
+fixture's real merge. Since there is no C# graph model any more, that IS the contract the renderer
+depends on.
+
+**The renderer itself has no automated coverage, deliberately.** It is verified visually against
+`git log --graph --oneline --all` on a merge-heavy repository - which is also how two real defects
+were found that no unit test would have: the graph fanning into a wall of lines without lane
+folding, and `GraphCanvas` painting over the Description column because it had only ever been one
+lane wide.
+
 ## Coverage gaps
 
 Known and deliberate:
 
-- **`GitApi.cpp`** — `DupBytes`, the `Joined`/`Sink` adapters, the exception guard, the `outLen` contract.
+- **`GitApi.cpp`** - the `Joined`/`Sink` adapters and the exception guard. `DupBytes` and the `outLen`
+  contract are now exercised indirectly by every packed export the end-to-end tests drive.
 - **`WindowsProcessRunner.cpp`** — argv quoting, environment-block ordering, job-object teardown, the stdin
   writer thread, the heartbeat thread. Verified by integration and manual testing instead.
 - **`MacProcessRunner.mm`, `PlatformFactory.cpp`** — the Mac path is source-complete but never built.

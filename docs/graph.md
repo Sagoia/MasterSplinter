@@ -1,137 +1,137 @@
 # The commit graph
 
-## Current state - a placeholder, but behind the right seam
-
-Every row still draws **one blue lane with a dot**, regardless of topology. What has changed is
-*where* that happens.
-
-Layout is now a single pass over the whole log, in `CommitGraph.Assign(commits, index)`:
-
-```csharp
-// GitRepository.Log / SearchLog
-=> WithGraph(ParseCommitRecords(...));   // parse, then lay out
-```
-
-It used to be assigned per row inside the record parser (`row.Graph = SimpleGraph()`), which is
-structurally backwards: **lane assignment is inherently cross-row** - where a commit sits depends on
-where its children sat - so a per-row hook could never have grown into the real thing. It also
-allocated five objects per commit for output identical on every row; the placeholder now shares one
-instance.
-
-The primitives themselves (`GraphRow`, `GraphLine`, `GraphDot`, `GraphBuilder`, `GraphColor`) now sit
-alone in `Models/Graph.cs`, so the step-3 delete below is removing a file rather than picking
-types out of a 365-line one.
-
-`CommitGraph.Assign` is the seam Phase E replaces. Only its body changes: it will hand the commit
-list to the native core and unpack the display list. Parsing, the view model and the history list
-stay as they are.
-
-### `CommitIndex`
-
-Lane layout resolves each commit's parents to positions, so it needs a hash lookup - scanning would
-be quadratic on a 2000-commit log. `CommitIndex` (built once per load, thrown away with it) provides
-`ByHash`, `PositionOfHash`, `PositionOf` and `Contains`, and is already threaded into
-`CommitGraph.Assign` even though the placeholder ignores it.
-
-Two semantics it pins, both of which matter to the algorithm:
-
-- **A parent outside the loaded window is a miss, not an error.** The log is capped at `MaxCommits`,
-  so an edge routinely leaves the window.
-- **Membership is reference identity, not hash equality.** Rows are rebuilt on every refresh, so a
-  row from a previous load has the same hash but is a different object.
-
-The view model's own hash lookups (restoring a selection after refresh, jumping from the reflog or
-blame) use it too. Every write to the loaded list goes through `SetLoadedCommits`, so the list and
-its index cannot disagree.
-
-Parent hashes have always been available - `MsGitLog` passes `--all --parents` and emits `%P` as
-field 2.
-
-## Planned design
-
-Split along the seam the core already uses: **layout is portable logic, rendering is per-platform.**
+Lane layout is portable C++; drawing is per-platform. The split the core already used for process
+execution, applied again:
 
 ```
 git log --all --parents
-   → GraphLayout (C++, pure, gtest'd)        ← the algorithm
-   → display list (fixed-size binary blob)   ← the contract
-   → D2DGraphRenderer (Windows) / CoreGraphics (macOS, later)
+   → Parse/LogParser        (records, C++)
+   → Graph/GraphLayout      (lanes, C++, gtest'd)
+   → display list           (a byte-sized span, the contract)
+   → Render/Windows/D2DGraphRenderer   /   CoreGraphics (macOS, later)
 ```
 
-### Layout — `MasterSplinter.Logic/Graph/GraphLayout.{h,cpp}`
+This page described a plan until Phases E and F landed. It now describes what was built, and
+**flags the four places the plan turned out to be wrong** — each marked *Corrected*, because they
+are the parts someone would otherwise repeat.
 
-Pure logic: no OS calls, no process spawn, no strings in the output. Input is the parsed commit list
-(hash + parents); output is, per row, the dot's lane, a colour index, and the segments crossing that row.
+## Layout — `Graph/GraphLayout.{h,cpp}`
 
-The algorithm is the incremental active-lane model: walk commits in display order, find or allocate the
-commit's lane, route each parent (reuse / fork / join / cross), and release lanes when a branch merges in.
-It needs a `hash → row index` map, which `CommitIndex` already provides (see above).
+Pure logic: no git, no process runner, no OS, no strings in the output. Input is per-row parent
+**row indices**; output is the display list.
 
-> **Reference, do not copy.** `TortoiseGit/src/TortoiseProc/lanes.{h,cpp}` is the qgit-derived `Lanes` class
-> (~26 lane states, 8 colours) with its driver in `LogDataVector.cpp`. **TortoiseGit is GPLv2+** — reading it
-> for the state machine is fine; copying the code would relicense this project.
+The model is the standard incremental active-lane walk. Per row: find the lane the commit sits on
+(the leftmost one already waiting for it, or a fresh slot), route each parent, release lanes as
+branches end. Five lane operations — claim, claim-for-parent, allocate, set, free.
 
-Test cases the suite must cover: straight-line history, simple fork/merge, octopus merge, criss-cross,
-multiple orphan roots, `--all` with disjoint roots, lane reuse after a branch ends, and stability when `-n`
-truncates the window so some parents fall outside it.
+Two rules keep the graph narrow, and both were added *because* driving it against a real
+repository showed the graph fanning into a wall of parallel lines:
 
-### The display list
+- **A merge parent joins a lane already heading for that commit** rather than opening another.
+- **A commit folds into a lane to its LEFT that is already heading for its first parent.** This is
+  what git draws as `|/`. Verified on CNTK, whose top six commits all have parent `e93964800`:
+  without the fold each held its own lane down to that commit; with it they collapse exactly as
+  git does. Leftward only — pulling a long-running lane rightward onto a tip would move the
+  mainline around from row to row.
 
-One new export returns the packed log records **and** the graph list in a single blob — one spawn, one
-allocation, one marshal:
+A parent outside the loaded window is `-1`, not an error: the log is capped at `MaxCommits`, so an
+edge routinely leaves it. Such a row is flagged `kFlagBoundary` and drawn with a hollow dot, so the
+line leaving the bottom of the row does not read as a dead end.
 
-```c
-char* MsGitLogGraph(const char* root, int order, int maxCount, int* outLen);
+Colours cycle 0–5 on lane *allocation*, not by lane index, so a branch keeps one colour for its
+whole life — which is the thing a reader actually follows.
+
+## The display list
+
+```
+u32 rowCount
+per row:  u8 laneCount · u8 dotLane · u8 colorIndex · u8 flags · u8 segCount
+          then segCount × { u8 x1, u8 y1, u8 x2, u8 y2, u8 colorIndex }
 ```
 
-Per row: `laneCount:u8, dotLane:u8, colorIndex:u8, flags:u8`, then
-`segCount:u8 × { x1, y1, x2, y2 (lane / half-row units), colorIndex }`.
+X is a lane index. Y is in **half-row units** (0 top, 1 centre, 2 bottom) so the whole list stays
+byte-sized; the renderer scales by row height. `flags`: bit 0 merge, bit 1 root, bit 2 boundary.
 
-Fixed-size and string-free, so the renderer walks it as a raw span with **zero per-row allocation** — and the
-macOS renderer will consume the identical bytes.
+> **Corrected.** The plan omitted the leading `u32 rowCount`. A renderer cannot validate a buffer
+> without it, and the host cannot check the graph describes the rows it actually has.
 
-### Renderer — Direct2D on a `SwapChainPanel`
+It rides in the **extra section of the packed log buffer** (see [abi.md](abi.md)), computed by
+`ParseLogRecordsWithGraph` in the same pass that builds the records.
 
-`Render/IGraphRenderer.h` (portable) + `Render/Windows/D2DGraphRenderer.cpp` (D3D11 + DXGI + D2D1),
-constructed by the existing `IPlatformFactory` — the same Bridge / Abstract Factory seam `IProcessRunner`
-already sits on, so macOS later drops in a CoreGraphics implementation and nothing above changes.
+> **Corrected.** The plan called for a separate `MsGitLogGraph` that re-walks the log. It exists
+> under that name, but it does the layout *inside the record parse* rather than as a second pass —
+> that is the only place each commit's parents are already resolved to row positions, and a
+> separate walk could disagree with the first if a ref moved between them, drawing the graph
+> against rows that are no longer on screen.
 
-A **handle-based** ABI, which is a new convention here (everything else is stateless root-passing):
+Search results deliberately carry **no** graph, and neither does a filtered list. Both are subsets,
+so almost every parent lies outside them; lanes drawn between them would describe a history that is
+not the one on screen. The old placeholder drew one blue lane per row here, which was equally
+meaningless but looked authoritative.
 
-```c
-void* MsGraphCreate(void* panelUnknown, float dpi);
-void  MsGraphSetModel(void* h, const void* displayList, int len);
-void  MsGraphSetViewport(void* h, float widthDip, float heightDip, double scrollPx, float rowHeightPx);
-void  MsGraphRender(void* h);
-void  MsGraphDestroy(void* h);
-```
+## Renderer — Direct2D on a `SwapChainPanel`
 
-C# hands over the `SwapChainPanel`'s `IUnknown*`; the C++ side QIs `ISwapChainPanelNative`
-(`microsoft.ui.xaml.media.dxinterop.h`, shipped in the Windows App SDK WinUI package) and calls
-`SetSwapChain`. **All COM and D3D work stays native.** Swap chain via
-`IDXGIFactory2::CreateSwapChainForComposition`, flip-sequential, `B8G8R8A8_UNORM`, 2 buffers; scale from
-`CompositionScaleChanged`; `DXGI_ERROR_DEVICE_REMOVED`/`_RESET` must recreate the device.
+`Render/IGraphRenderer.h` (portable) + `Render/Windows/D2DGraphRenderer.cpp`, built by
+`IPlatformFactory` — the same Abstract Factory seam `IProcessRunner` sits on, so macOS drops in a
+CoreGraphics implementation and nothing above changes. `MacPlatformFactory` returns `nullptr`
+today, which the host treats as "draw no graph".
 
-On the XAML side the graph column leaves the `DataTemplate` entirely: a `SwapChainPanel` overlays the fixed
-150 px column with `IsHitTestVisible=false`, fed the history `ScrollViewer`'s vertical offset on
-`ViewChanged`. Row height stays a fixed **26 px**, which is what makes offset → row arithmetic exact.
+A **handle-based** ABI, the only one here: a renderer owns a GPU device that has to live across
+calls. `MsGraphCreate` takes the panel's `IUnknown*`; every piece of COM and D3D work stays native.
 
-**Why Direct2D rather than Win2D:** Win2D *is* Direct2D behind a WinRT wrapper. Going straight to D2D avoids a
-NuGet dependency and means the drawing code is already where the planned C++ migration wants it.
+- D3D11 (BGRA support) → `ID2D1Device` → device context; swap chain via
+  `IDXGIFactory2::CreateSwapChainForComposition`, flip-sequential, `B8G8R8A8_UNORM`, 2 buffers.
+- Falls back to WARP when there is no usable GPU. A failed create degrades to a blank graph column,
+  never to a crash.
+- `DXGI_ERROR_DEVICE_REMOVED` / `_RESET` and `D2DERR_RECREATE_TARGET` rebuild the device.
+- Rows are indexed once when the model is set, so a scroll jumps straight to the first visible row
+  instead of walking the list every frame.
 
-**What this design cannot do:** the renderer is not unit-testable the way the layout is. Only `GraphLayout`
-gets gtest coverage; the renderer is verified visually, with an optional "draw to a WIC bitmap and hash it"
-harness if regression coverage is wanted later.
+> **Corrected, and this is the big one.** The plan had the panel overlay the list transparently,
+> with the row selection showing through from underneath. **That does not work.** A WinUI 3 desktop
+> `SwapChainPanel` does not blend with the XAML content behind it: clearing fully transparent
+> leaves black, not the rows. Measured — clearing to 50% red over a (30,30,30) list reads back
+> (64,0,0), which is the source composited over *black*.
+>
+> So the surface paints the row background and the selection band itself, from colours read out of
+> the same `ListView` resources the rows use. WinUI insets its band by 2px and rounds it; a plain
+> full-height rectangle left a visible step at the column boundary, so the renderer reproduces
+> both. Measured after: the band spans y 509..530 on each side of the boundary.
+>
+> The cost is that a little list chrome now lives in the renderer (`Chrome`, `SetSelection`).
+> Hover is not reproduced — the row under the pointer shows its pointer-over tint only in the
+> Description column. That is the one visible seam left, and it is deliberate: tracking hover would
+> mean duplicating more of the template for less.
 
-### Staging
+> **Corrected.** `ISwapChainPanelNative` is hand-declared (`MIDL_INTERFACE`, one method, the GUID
+> `63aad0b8-7c24-40ff-85a8-640d944cc325`). The plan noted the header ships in the WinUI package —
+> it does, but using it means adding the whole WinUI NuGet package to a plain C++ DLL that needs
+> nothing else from it.
 
-Shippable in three steps:
+On the XAML side the graph column leaves the `DataTemplate` entirely: a `SwapChainPanel` overlays
+the fixed 150 px column with `IsHitTestVisible=false`, fed the history `ScrollViewer`'s vertical
+offset on `ViewChanged`. Row height is a fixed **26 px**, which is what makes offset → row exact —
+verified by selecting a row after scrolling ~1400 px and measuring the band centred on the same
+pixel in both columns.
 
-1. Layout in C++ + display list + gtest, still drawn by the existing `GraphCanvas` (translate the display
-   list back into `GraphRow`). Proves the algorithm against real repositories at zero rendering risk.
-2. `SwapChainPanel` + D2D renderer replaces `GraphCanvas`.
-3. Delete `GraphCanvas.cs` and the `GraphRow` / `GraphLine` / `GraphDot` / `GraphBuilder` / `GraphColor`
-   model types.
+**Why Direct2D rather than Win2D:** Win2D *is* Direct2D behind a WinRT wrapper. Going straight to
+D2D avoids a NuGet dependency and puts the drawing code where the C++ core already is.
 
-Correctness check at every step: compare the rendered lanes against `git log --graph --oneline --all` on a
-merge-heavy repository.
+## What this design cannot do
+
+The renderer is not unit-testable the way the layout is. `GraphLayout` has 19 gtest cases; the
+renderer is verified visually, against `git log --graph --oneline --all` on a merge-heavy
+repository. A "draw to a WIC bitmap and hash it" harness would close that if regression coverage is
+ever wanted.
+
+## How it shipped
+
+Three commits, each independently verifiable:
+
+1. **E** — layout in C++ + display list + gtest, still drawn by the old per-row `GraphCanvas`.
+   Proved the algorithm against real repositories at zero rendering risk. It also exposed that
+   `GraphCanvas` never clipped to its column: it had only ever drawn one lane, and CNTK's
+   twenty-odd painted straight over the Description text.
+2. **F1** — the D2D renderer replaces `GraphCanvas`.
+3. **F2** — `GraphCanvas.cs` and `Models/Graph.cs` deleted. Isolating those types during the
+   refactor is what made this a file deletion rather than an untangling.

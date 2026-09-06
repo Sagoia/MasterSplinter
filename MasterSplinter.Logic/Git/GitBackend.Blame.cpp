@@ -9,12 +9,17 @@
 #include "GitBackend.h"
 #include "GitText.h"
 
+#include "../Packed/PackedWriter.h"
+#include "../Parse/BlameParser.h"
+
 namespace ms
 {
     namespace
     {
-        // Blame content lines are raw file bytes. A NUL would truncate the whole payload at the
-        // managed marshaller, so a binary file has to be refused rather than silently half-shown.
+        // Blame content lines are raw file bytes. The packed format carries NULs safely now
+        // (they are length-prefixed, not NUL-terminated), so this is no longer a transport
+        // limit -- it is kept because per-line authorship over binary content is noise, and
+        // saying so is more useful than rendering it.
         bool ContainsNul(const std::string& s)
         {
             return s.find('\0') != std::string::npos;
@@ -25,12 +30,19 @@ namespace ms
                                   const std::string& path, bool ignoreWhitespace,
                                   const std::string& detectMoves) const
     {
+        // Packed exports carry status in the header instead of OK/ERR framing, so every exit
+        // below -- success or failure -- is a well-formed buffer the host can read uniformly.
+        auto fail = [](std::string message)
+        {
+            return packed::PackedWriter::Error(packed::Kind::Blame, std::move(message));
+        };
+
         if (root.empty())
-            return NoRoot();
+            return fail("No repository is open.");
         if (IsBlank(path))
-            return Err("No file was provided");
+            return fail("No file was provided");
         if (LooksLikeOption(path) || LooksLikeOption(rev))
-            return Err("Invalid revision or path");
+            return fail("Invalid revision or path");
 
         // Named modes rather than an int ladder, for the reason MsGitSequencerAction spells out.
         // The flags mirror TortoiseGit's detect-moved-or-copied setting.
@@ -44,11 +56,11 @@ namespace ms
         else if (detectMoves == "any")
             moveFlags = { "-C", "-C" };           // ...and from any file in the commit that created it
         else
-            return Err("Unknown move detection mode: " + detectMoves);
+            return fail("Unknown move detection mode: " + detectMoves);
 
         // --porcelain, not --line-porcelain: the latter repeats every header on every line, which
         // is many times the output for the same information. The per-commit header dedup it implies
-        // is unpacked by the host's parser.
+        // is unpacked by Parse/BlameParser.
         GitArgs args;
         args.QuotePathOff()
             .Add({ "blame", "--porcelain" })
@@ -62,15 +74,12 @@ namespace ms
         if (code != 0)
         {
             TrimTrailingNewlines(out);
-            return Err(out.empty() ? std::string("git blame failed") : std::move(out));
+            return fail(out.empty() ? std::string("git blame failed") : std::move(out));
         }
         if (ContainsNul(out))
-            return Err("This file is binary; blame is not available.");
+            return fail("This file is binary; blame is not available.");
 
-        // OK/ERR-framed even though this is a read: "path not in that revision" is a routine,
-        // actionable failure and the message is worth keeping. The host splits on the FIRST US
-        // only, so 0x1F bytes inside file content stay intact.
-        return std::string("OK") + US + out;
+        return parse::ParsePorcelainBlame(out, path);
     }
 
 }

@@ -292,6 +292,10 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 var results = await Task.Run(() => repo.SearchLog(mode, query, path, order,
                                                                   MaxCommits, matchCase, useRegex, all));
                 SetLoadedCommits(results);
+                // Search results are a filtered subset, so lanes between them would describe a
+                // history that is not the one on screen. Clear rather than leave the log's graph
+                // drawn against different rows.
+                SetGraphDisplayList(System.Array.Empty<byte>());
                 IsSearchResultMode = true;
                 SearchBannerText = SearchBanner.Describe(mode, query, path, results.Count);
 

@@ -654,7 +654,10 @@
                                         <ColumnDefinition Width="96" />
                                     </Grid.ColumnDefinitions>
 
-                                    <inf:GraphCanvas Row="{Binding Graph}" VerticalAlignment="Center" Margin="2,0,0,0" />
+                                    <!-- The graph is drawn once for the whole column by the
+                                         SwapChainPanel below, not per row. This cell is the
+                                         spacer that keeps the other columns where they were. -->
+                                    <Border />
 
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Spacing="2">
                                         <ItemsControl ItemsSource="{Binding Badges}" ItemTemplateSelector="{StaticResource BadgeSelector}"
@@ -681,6 +684,24 @@
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
+
+                    <!-- Direct2D commit graph. Overlays the fixed 150px Graph column and is fed
+                         the history list's scroll offset, so ONE surface draws every row instead
+                         of a Canvas per realized row. IsHitTestVisible=False so selection, hover
+                         and the context menu still reach the rows underneath. The renderer paints
+                         the theme background and selected rows itself; the host keeps those colors
+                         and the selection in sync. Declared after the ListView so it
+                         composites on top of it. -->
+                    <SwapChainPanel x:Name="GraphSurface" Grid.Row="2"
+                                    Background="{ThemeResource PanelBackgroundBrush}"
+                                    Width="150" HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                                    IsHitTestVisible="False"
+                                    Visibility="{Binding IsReflogMode, Converter={StaticResource InvBoolToVis}}"
+                                    Loaded="GraphSurface_Loaded"
+                                    Unloaded="GraphSurface_Unloaded"
+                                    ActualThemeChanged="GraphSurface_ActualThemeChanged"
+                                    SizeChanged="GraphSurface_SizeChanged"
+                                    CompositionScaleChanged="GraphSurface_CompositionScaleChanged" />
                 </Grid>
 
                 <!-- horizontal splitter between history and detail -->

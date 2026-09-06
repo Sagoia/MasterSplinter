@@ -176,6 +176,120 @@ public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
     }
 
     [Fact]
+    public void TheCommitGraphIsLaidOutOverRealHistory()
+    {
+        // The fixture has a real two-parent merge and a branch, so the lanes must actually branch.
+        // Asserted against real git rather than a hand-built adjacency list, which is the only way
+        // to catch the graph being laid out over the wrong rows.
+        //
+        // Reads the display list the way the renderer does, byte for byte: there is no C# graph
+        // model any more, so this IS the contract the drawing depends on.
+        GitRepository git = Open();
+        IReadOnlyList<CommitRow> log = git.Log(order: 1, maxCount: 100);
+        byte[] graph = git.GraphDisplayList;
+
+        Assert.NotEmpty(log);
+        Assert.True(graph.Length >= 4, "the display list carries at least its row count");
+
+        int rowCount = BitConverter.ToInt32(graph, 0);
+        Assert.Equal(log.Count, rowCount);
+
+        const int rowHeader = 5;    // laneCount, dotLane, colorIndex, flags, segCount
+        const int segment = 5;      // x1, y1, x2, y2, colorIndex
+        const byte flagMerge = 0x01;
+
+        int at = 4;
+        bool sawMerge = false;
+        bool sawDiagonal = false;
+        int widest = 0;
+
+        for (int row = 0; row < rowCount; row++)
+        {
+            Assert.True(at + rowHeader <= graph.Length, $"row {row} header is inside the buffer");
+            int laneCount = graph[at];
+            int dotLane = graph[at + 1];
+            byte flags = graph[at + 3];
+            int segments = graph[at + 4];
+            at += rowHeader;
+
+            Assert.True(laneCount >= 1, $"row {row} has at least one lane");
+            Assert.True(dotLane < laneCount, $"row {row} draws its dot inside its own width");
+            widest = Math.Max(widest, laneCount);
+            if ((flags & flagMerge) != 0)
+                sawMerge = true;
+
+            Assert.True(at + (segments * segment) <= graph.Length, $"row {row} segments fit");
+            for (int s = 0; s < segments; s++, at += segment)
+            {
+                int x1 = graph[at], y1 = graph[at + 1], x2 = graph[at + 2], y2 = graph[at + 3];
+
+                // What the renderer bets on: nothing is drawn outside the row's declared width,
+                // and Y stays in half-row units.
+                Assert.InRange(x1, 0, laneCount - 1);
+                Assert.InRange(x2, 0, laneCount - 1);
+                Assert.InRange(y1, 0, 2);
+                Assert.InRange(y2, 0, 2);
+                Assert.InRange(graph[at + 4], 0, 5);   // colour index, six-entry palette
+
+                if (x1 != x2)
+                    sawDiagonal = true;
+            }
+        }
+
+        Assert.Equal(graph.Length, at);
+        Assert.True(sawMerge, "the fixture's two-parent merge should be flagged as one");
+        Assert.True(widest > 1, "the merge should widen the graph past a single lane");
+        Assert.True(sawDiagonal, "a fork or join draws a line that changes lane within its row");
+    }
+
+    [Theory]
+    [InlineData(100)]
+    [InlineData(3)]
+    public void ReverseDateOrderMirrorsTheGraphAlongWithTheCommits(int maxCount)
+    {
+        // Exercise the order flag through git, the native parser and P/Invoke, including a
+        // truncated window: reversing must keep the same commits and the same lane connections.
+        static List<byte[]> ReadRows(byte[] graph)
+        {
+            Assert.True(graph.Length >= 4);
+            int count = BitConverter.ToInt32(graph, 0);
+            var rows = new List<byte[]>();
+            int at = 4;
+            for (int i = 0; i < count; i++)
+            {
+                Assert.True(at + 5 <= graph.Length);
+                int length = 5 + graph[at + 4] * 5;
+                Assert.True(at + length <= graph.Length);
+                rows.Add(graph[at..(at + length)]);
+                at += length;
+            }
+            Assert.Equal(graph.Length, at);
+            return rows;
+        }
+
+        GitRepository git = Open();
+        IReadOnlyList<CommitRow> forward = git.Log(order: 0, maxCount: maxCount);
+        List<byte[]> forwardRows = ReadRows(git.GraphDisplayList);
+        IReadOnlyList<CommitRow> reverse = git.Log(order: 2, maxCount: maxCount);
+        List<byte[]> reverseRows = ReadRows(git.GraphDisplayList);
+
+        Assert.NotEmpty(forward);
+        Assert.Equal(forward.Select(c => c.FullHash).Reverse(), reverse.Select(c => c.FullHash));
+        Assert.Equal(forward.Count, forwardRows.Count);
+        Assert.Equal(reverse.Count, reverseRows.Count);
+        for (int i = 0; i < reverseRows.Count; i++)
+        {
+            byte[] expected = forwardRows[forwardRows.Count - 1 - i];
+            for (int at = 5; at < expected.Length; at += 5)
+            {
+                expected[at + 1] = (byte)(2 - expected[at + 1]);
+                expected[at + 3] = (byte)(2 - expected[at + 3]);
+            }
+            Assert.Equal(expected, reverseRows[i]);
+        }
+    }
+
+    [Fact]
     public void RefsIncludeTheBranchesAndTheTag()
     {
         GitRepository.RefList refs = Open().ListRefs();
@@ -263,6 +377,70 @@ public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
     }
 
     [Fact]
+    public void ACommitMessageContainingTheSeparatorBytesRoundTripsIntact()
+    {
+        // The bug Phase D's log format exists to kill, proven against real git rather than against
+        // a hand-written sample. Under the old format (records ended with %x1e, message split
+        // across %s and %b) this commit came back with a truncated subject, a body holding the
+        // subject's tail, and a phantom half-record that the field-count floor then dropped.
+        //
+        // Its own repository, not the shared fixture: a commit this odd should not be able to
+        // perturb what every other test reads.
+        Assert.True(_repo.Usable, "scratch repo unavailable: " + _repo.SkipReason);
+
+        string dir = Path.Combine(Path.GetTempPath(), "ms-sep-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            void Run(string args)
+            {
+                var psi = new ProcessStartInfo("git", args)
+                {
+                    WorkingDirectory = dir,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                };
+                using Process p = Process.Start(psi) ?? throw new InvalidOperationException("git did not start");
+                p.WaitForExit();
+            }
+
+            Run("init -q -b main");
+            Run("config user.email test@example.com");
+            Run("config user.name \"Test User\"");
+            Run("config commit.gpgsign false");
+            File.WriteAllText(Path.Combine(dir, "f.txt"), "x\n");
+
+            // 0x1F in the subject AND 0x1E in the body -- the two failures are independent.
+            const string subject = "sub\u001fject line";
+            const string body = "body\u001etail";
+            string messageFile = Path.Combine(dir, "msg.txt");
+            File.WriteAllText(messageFile, subject + "\n\n" + body + "\n");
+
+            Run("add f.txt");
+            Run("commit -q -F msg.txt");
+
+            GitRepository? git = GitRepository.Open(dir, out string? error);
+            Assert.Null(error);
+            Assert.NotNull(git);
+
+            CommitRow row = Assert.Single(git!.Log(order: 0, maxCount: 10));
+            Assert.Equal(subject, row.Message);
+            Assert.Equal(body, row.Body);
+        }
+        finally
+        {
+            try
+            {
+                foreach (string f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                    File.SetAttributes(f, FileAttributes.Normal);
+                Directory.Delete(dir, recursive: true);
+            }
+            catch { /* a leftover temp dir is not worth failing a test run over */ }
+        }
+    }
+
+    [Fact]
     public void SearchFindsACommitByMessage()
     {
         IReadOnlyList<CommitRow> hits = Open().SearchLog(
@@ -270,6 +448,78 @@ public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
             matchCase: false, useRegex: false, allBranches: true);
 
         Assert.Contains(hits, c => c.Message == "first commit");
+    }
+
+    [Fact]
+    public void TheStashListParsesAgainstRealGit()
+    {
+        // D5 moved stash parsing into the native core and changed its git format (-z, the
+        // free-form %gs last, the offset off %aI). The shared fixture has no stash and adding one
+        // would disturb the dirty tree every other test reads, so this builds its own repository.
+        Assert.True(_repo.Usable, "scratch repo unavailable: " + _repo.SkipReason);
+
+        string dir = Path.Combine(Path.GetTempPath(), "ms-stash-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            void Run(string args)
+            {
+                var psi = new ProcessStartInfo("git", args)
+                {
+                    WorkingDirectory = dir,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                };
+                using Process p = Process.Start(psi) ?? throw new InvalidOperationException("git did not start");
+                p.WaitForExit();
+            }
+
+            Run("init -q -b main");
+            Run("config user.email test@example.com");
+            Run("config user.name \"Test User\"");
+            Run("config commit.gpgsign false");
+            File.WriteAllText(Path.Combine(dir, "f.txt"), "one\n");
+            Run("add f.txt");
+            Run("commit -q -m base");
+
+            // Two stashes: one with git's composed "WIP on <branch>" subject, one with a message
+            // the user supplied, so both halves of the subject split are exercised.
+            File.WriteAllText(Path.Combine(dir, "f.txt"), "two\n");
+            Run("stash push");
+            File.WriteAllText(Path.Combine(dir, "f.txt"), "three\n");
+            Run("stash push -m \"my own message\"");
+
+            GitRepository? git = GitRepository.Open(dir, out string? error);
+            Assert.Null(error);
+            Assert.NotNull(git);
+
+            IReadOnlyList<StashEntry> stashes = git!.ListStashes();
+            Assert.Equal(2, stashes.Count);
+
+            // Newest first, and the selectors are positional.
+            Assert.Equal("stash@{0}", stashes[0].Selector);
+            Assert.Equal("stash@{1}", stashes[1].Selector);
+            Assert.Equal(0, stashes[0].Index);
+            Assert.Equal(1, stashes[1].Index);
+
+            // The user-supplied message keeps its own text; git's composed one yields a branch.
+            Assert.Contains(stashes, e => e.Message == "my own message");
+            Assert.Contains(stashes, e => e.Branch == "main");
+
+            Assert.All(stashes, e => Assert.False(string.IsNullOrWhiteSpace(e.Sha)));
+            Assert.All(stashes, e => Assert.NotEqual(default, e.When));
+        }
+        finally
+        {
+            try
+            {
+                foreach (string f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                    File.SetAttributes(f, FileAttributes.Normal);
+                Directory.Delete(dir, recursive: true);
+            }
+            catch { /* a leftover temp dir is not worth failing a test run over */ }
+        }
     }
 
     [Fact]

@@ -67,7 +67,7 @@ namespace MasterSplinter.Entrypoint.ViewModels
                 ApplyRefs(refsTask.Result, stashesTask.Result);
 
                 SetLoadedCommits(logTask.Result);
-                ApplyFilter();
+                ApplyFilter();   // also publishes the graph for the rows it just set
                 SelectedCommit = Commits.FirstOrDefault();
 
                 await LoadStateAsync(stateTask.Result); // a repository can be opened mid-merge (Phase 7)
@@ -265,6 +265,13 @@ namespace MasterSplinter.Entrypoint.ViewModels
             // One Reset notification, not one per row: the unfiltered list is up to MaxCommits long
             // and this runs on the UI thread.
             Commits.Reset(source);
+
+            // The graph is laid out over the LOADED rows, so it only describes what is on screen
+            // while nothing is filtered out. A narrowed list gets no graph rather than one drawn
+            // against rows that are no longer there.
+            SetGraphDisplayList(Commits.Count == _allCommits.Count && _repo != null
+                                    ? _repo.GraphDisplayList
+                                    : Array.Empty<byte>());
 
             if (SelectedCommit == null || !Commits.Contains(SelectedCommit))
                 SelectedCommit = Commits.FirstOrDefault();

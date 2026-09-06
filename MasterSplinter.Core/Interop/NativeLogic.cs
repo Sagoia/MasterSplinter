@@ -45,24 +45,33 @@ namespace MasterSplinter.Entrypoint.Interop
         private static extern IntPtr MsGitOpenRepository([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
 
         [DllImport(Dll, EntryPoint = "MsGitLog", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr MsGitLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root, int order, int maxCount);
+        private static extern IntPtr MsGitLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root, int order,
+                                              int maxCount, out int len);
+
+        [DllImport(Dll, EntryPoint = "MsGitLogGraph", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGitLogGraph([MarshalAs(UnmanagedType.LPUTF8Str)] string root, int order,
+                                                   int maxCount, out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitRefDetails", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr MsGitRefDetails([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+        private static extern IntPtr MsGitRefDetails([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                     out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitCommitFiles", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitCommitFiles([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
-                                                      [MarshalAs(UnmanagedType.LPUTF8Str)] string sha);
+                                                      [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
+                                                      out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitCommitShortStat", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitCommitShortStat([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
-                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string sha);
+                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
+                                                          out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFileDiff", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string sha,
                                                    [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
-                                                   int wsMode);
+                                                   int wsMode,
+                                                   out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFileAtCommit", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileAtCommit([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -72,28 +81,33 @@ namespace MasterSplinter.Entrypoint.Interop
         [DllImport(Dll, EntryPoint = "MsGitRangeFiles", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitRangeFiles([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                      [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
-                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string b);
+                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string b,
+                                                     out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitRangeShortStat", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitRangeShortStat([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                          [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
-                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string b);
+                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string b,
+                                                         out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitRangeFileDiff", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitRangeFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string b,
                                                         [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
-                                                        int wsMode);
+                                                        int wsMode,
+                                                        out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitStatus", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr MsGitStatus([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+        private static extern IntPtr MsGitStatus([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                 out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitWorkTreeFileDiff", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitWorkTreeFileDiff([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                            [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
                                                            int area,
-                                                           int wsMode);
+                                                           int wsMode,
+                                                           out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFileBytesAtCommit", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitFileBytesAtCommit([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -257,7 +271,8 @@ namespace MasterSplinter.Entrypoint.Interop
         // ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------
 
         [DllImport(Dll, EntryPoint = "MsGitStashList", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr MsGitStashList([MarshalAs(UnmanagedType.LPUTF8Str)] string root);
+        private static extern IntPtr MsGitStashList([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
+                                                    out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitStashSave", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitStashSave([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -282,7 +297,8 @@ namespace MasterSplinter.Entrypoint.Interop
                                                 [MarshalAs(UnmanagedType.LPUTF8Str)] string rev,
                                                 [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
                                                 [MarshalAs(UnmanagedType.I1)] bool ignoreWhitespace,
-                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string detectMoves);
+                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string detectMoves,
+                                                out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitSearchLog", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitSearchLog([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
@@ -292,15 +308,62 @@ namespace MasterSplinter.Entrypoint.Interop
                                                     int order, int maxCount,
                                                     [MarshalAs(UnmanagedType.I1)] bool matchCase,
                                                     [MarshalAs(UnmanagedType.I1)] bool useRegex,
-                                                    [MarshalAs(UnmanagedType.I1)] bool allBranches);
+                                                    [MarshalAs(UnmanagedType.I1)] bool allBranches,
+                                                    out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitReflog", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr MsGitReflog([MarshalAs(UnmanagedType.LPUTF8Str)] string root,
                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
-                                                 int maxCount);
+                                                 int maxCount,
+                                                 out int len);
 
         [DllImport(Dll, EntryPoint = "MsGitFree", CallingConvention = CallingConvention.Cdecl)]
         private static extern void MsGitFree(IntPtr ptr);
+
+        // ---- Commit graph rendering (Phase F) -----------------------------------------------
+        // Handle-based, unlike every other export: a renderer owns a GPU device that has to live
+        // across calls. The handle is opaque here and is released by GraphDestroy.
+
+        [DllImport(Dll, EntryPoint = "MsGraphCreate", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGraphCreate(IntPtr panelUnknown);
+
+        [DllImport(Dll, EntryPoint = "MsGraphSetModel", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphSetModel(IntPtr handle, byte[]? displayList, int length);
+
+        [DllImport(Dll, EntryPoint = "MsGraphSetViewport", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphSetViewport(IntPtr handle, float widthDip, float heightDip,
+                                                      double scrollPx, float rowHeightPx, float scale);
+
+        [DllImport(Dll, EntryPoint = "MsGraphSetTheme", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphSetTheme(IntPtr handle, uint backgroundArgb, uint selectedArgb);
+
+        [DllImport(Dll, EntryPoint = "MsGraphSetSelection", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphSetSelection(IntPtr handle, int[]? rows, int count);
+
+        [DllImport(Dll, EntryPoint = "MsGraphRender", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphRender(IntPtr handle);
+
+        [DllImport(Dll, EntryPoint = "MsGraphDestroy", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphDestroy(IntPtr handle);
+
+        internal static IntPtr GraphCreate(IntPtr panelUnknown) => MsGraphCreate(panelUnknown);
+
+        internal static void GraphSetModel(IntPtr handle, byte[]? displayList)
+            => MsGraphSetModel(handle, displayList, displayList?.Length ?? 0);
+
+        internal static void GraphSetViewport(IntPtr handle, float widthDip, float heightDip,
+                                              double scrollPx, float rowHeightPx, float scale)
+            => MsGraphSetViewport(handle, widthDip, heightDip, scrollPx, rowHeightPx, scale);
+
+        internal static void GraphSetTheme(IntPtr handle, uint backgroundArgb, uint selectedArgb)
+            => MsGraphSetTheme(handle, backgroundArgb, selectedArgb);
+
+        internal static void GraphSetSelection(IntPtr handle, int[]? rows)
+            => MsGraphSetSelection(handle, rows, rows?.Length ?? 0);
+
+        internal static void GraphRender(IntPtr handle) => MsGraphRender(handle);
+
+        internal static void GraphDestroy(IntPtr handle) => MsGraphDestroy(handle);
 
         /// <summary>Copies a UTF-8 string returned by the native git backend, then frees it.</summary>
         private static string TakeString(IntPtr ptr)
@@ -311,18 +374,103 @@ namespace MasterSplinter.Entrypoint.Interop
             finally { MsGitFree(ptr); }
         }
 
+        /// <summary>
+        /// Copies a length-prefixed byte payload returned by the native core, then frees it.
+        /// <para>
+        /// This is the counterpart to <see cref="TakeString"/> for the exports that publish an
+        /// explicit length: their payload may contain NULs, so <c>PtrToStringUTF8</c> (which is
+        /// strlen-based) would truncate it. Used by the raw file-bytes export and by every packed
+        /// export -- see <see cref="PackedBuffer"/>.
+        /// </para>
+        /// </summary>
+        internal static byte[] TakeBytes(IntPtr ptr, int len)
+        {
+            if (ptr == IntPtr.Zero)
+                return Array.Empty<byte>();
+            try
+            {
+                if (len <= 0)
+                    return Array.Empty<byte>();
+                var buffer = new byte[len];
+                Marshal.Copy(ptr, buffer, 0, len);
+                return buffer;
+            }
+            finally { MsGitFree(ptr); }
+        }
+
         public static string GitOpenRepository(string path) => TakeString(MsGitOpenRepository(path));
-        public static string GitLog(string root, int order, int maxCount) => TakeString(MsGitLog(root, order, maxCount));
-        public static string GitRefDetails(string root) => TakeString(MsGitRefDetails(root));
-        public static string GitCommitFiles(string root, string sha) => TakeString(MsGitCommitFiles(root, sha));
-        public static string GitCommitShortStat(string root, string sha) => TakeString(MsGitCommitShortStat(root, sha));
-        public static string GitFileDiff(string root, string sha, string path, int wsMode) => TakeString(MsGitFileDiff(root, sha, path, wsMode));
+        /// <summary>Parsed commit records as a packed buffer, with no commit graph.</summary>
+        public static PackedBuffer GitLog(string root, int order, int maxCount)
+        {
+            IntPtr ptr = MsGitLog(root, order, maxCount, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+
+        /// <summary>
+        /// The same records plus the commit-graph display list, in the buffer's extra section.
+        /// One spawn: a separate graph walk could disagree with the record walk if a ref moved
+        /// between them, and the lanes would then describe rows that are no longer on screen.
+        /// </summary>
+        public static PackedBuffer GitLogGraph(string root, int order, int maxCount)
+        {
+            IntPtr ptr = MsGitLogGraph(root, order, maxCount, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+        /// <summary>Branches, tags and remote-tracking refs, as a packed buffer.</summary>
+        public static PackedBuffer GitRefDetails(string root)
+        {
+            IntPtr ptr = MsGitRefDetails(root, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+        /// <summary>Files changed in one commit, as a packed buffer.</summary>
+        public static PackedBuffer GitCommitFiles(string root, string sha)
+        {
+            IntPtr ptr = MsGitCommitFiles(root, sha, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+        public static PackedBuffer GitCommitShortStat(string root, string sha)
+        {
+            IntPtr ptr = MsGitCommitShortStat(root, sha, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+        /// <summary>Parsed unified diff for one file in a commit, as a packed buffer.</summary>
+        public static PackedBuffer GitFileDiff(string root, string sha, string path, int wsMode)
+        {
+            IntPtr ptr = MsGitFileDiff(root, sha, path, wsMode, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         public static string GitFileAtCommit(string root, string sha, string path) => TakeString(MsGitFileAtCommit(root, sha, path));
-        public static string GitRangeFiles(string root, string a, string b) => TakeString(MsGitRangeFiles(root, a, b));
-        public static string GitRangeShortStat(string root, string a, string b) => TakeString(MsGitRangeShortStat(root, a, b));
-        public static string GitRangeFileDiff(string root, string a, string b, string path, int wsMode) => TakeString(MsGitRangeFileDiff(root, a, b, path, wsMode));
-        public static string GitStatus(string root) => TakeString(MsGitStatus(root));
-        public static string GitWorkTreeFileDiff(string root, string path, int area, int wsMode) => TakeString(MsGitWorkTreeFileDiff(root, path, area, wsMode));
+        /// <summary>Files changed between two commits, as a packed buffer.</summary>
+        public static PackedBuffer GitRangeFiles(string root, string a, string b)
+        {
+            IntPtr ptr = MsGitRangeFiles(root, a, b, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+        public static PackedBuffer GitRangeShortStat(string root, string a, string b)
+        {
+            IntPtr ptr = MsGitRangeShortStat(root, a, b, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+        /// <summary>Parsed unified diff for one file between two commits, as a packed buffer.</summary>
+        public static PackedBuffer GitRangeFileDiff(string root, string a, string b, string path, int wsMode)
+        {
+            IntPtr ptr = MsGitRangeFileDiff(root, a, b, path, wsMode, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+        /// <summary>Working-tree status, one record per (file, section), as a packed buffer.</summary>
+        public static PackedBuffer GitStatus(string root)
+        {
+            IntPtr ptr = MsGitStatus(root, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+        /// <summary>Parsed unified diff for one working-tree file, as a packed buffer.
+        /// <paramref name="area"/> follows the ABI numbering (0 = unstaged), NOT the enum order --
+        /// always go through GitRepository.AreaFlag.</summary>
+        public static PackedBuffer GitWorkTreeFileDiff(string root, string path, int area, int wsMode)
+        {
+            IntPtr ptr = MsGitWorkTreeFileDiff(root, path, area, wsMode, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         public static string GitStagePaths(string root, string paths) => TakeString(MsGitStagePaths(root, paths));
         public static string GitStageAll(string root) => TakeString(MsGitStageAll(root));
         public static string GitUnstagePaths(string root, string paths) => TakeString(MsGitUnstagePaths(root, paths));
@@ -342,19 +490,41 @@ namespace MasterSplinter.Entrypoint.Interop
 
         // ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------
 
-        public static string GitStashList(string root) => TakeString(MsGitStashList(root));
+        /// <summary>The stash, newest first, as a packed buffer.</summary>
+        public static PackedBuffer GitStashList(string root)
+        {
+            IntPtr ptr = MsGitStashList(root, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
         public static string GitStashSave(string root, string message, bool includeUntracked, bool keepIndex)
             => TakeString(MsGitStashSave(root, message, includeUntracked, keepIndex));
         public static string GitStashApply(string root, string refName) => TakeString(MsGitStashApply(root, refName));
         public static string GitStashPop(string root, string refName) => TakeString(MsGitStashPop(root, refName));
         public static string GitStashDrop(string root, string refName) => TakeString(MsGitStashDrop(root, refName));
-        public static string GitBlame(string root, string rev, string path, bool ignoreWhitespace, string detectMoves)
-            => TakeString(MsGitBlame(root, rev, path, ignoreWhitespace, detectMoves));
-        public static string GitSearchLog(string root, string mode, string query, string pathFilter,
-                                          int order, int maxCount, bool matchCase, bool useRegex, bool allBranches)
-            => TakeString(MsGitSearchLog(root, mode, query, pathFilter, order, maxCount, matchCase, useRegex, allBranches));
-        public static string GitReflog(string root, string refName, int maxCount)
-            => TakeString(MsGitReflog(root, refName, maxCount));
+        /// <summary>Per-line authorship as a packed buffer; failure travels in its header.</summary>
+        public static PackedBuffer GitBlame(string root, string rev, string path, bool ignoreWhitespace,
+                                            string detectMoves)
+        {
+            IntPtr ptr = MsGitBlame(root, rev, path, ignoreWhitespace, detectMoves, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+
+        /// <summary>Search results as a packed buffer, byte-identical in shape to GitLog.</summary>
+        public static PackedBuffer GitSearchLog(string root, string mode, string query, string pathFilter,
+                                                int order, int maxCount, bool matchCase, bool useRegex,
+                                                bool allBranches)
+        {
+            IntPtr ptr = MsGitSearchLog(root, mode, query, pathFilter, order, maxCount, matchCase,
+                                        useRegex, allBranches, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
+
+        /// <summary>Where a ref has been, as a packed buffer.</summary>
+        public static PackedBuffer GitReflog(string root, string refName, int maxCount)
+        {
+            IntPtr ptr = MsGitReflog(root, refName, maxCount, out int len);
+            return PackedBuffer.Wrap(TakeBytes(ptr, len));
+        }
 
         /// <summary>
         /// Wraps a managed progress handler as a native callback for the duration of one call.
@@ -426,17 +596,7 @@ namespace MasterSplinter.Entrypoint.Interop
         public static byte[] GitFileBytesAtCommit(string root, string sha, string path)
         {
             IntPtr ptr = MsGitFileBytesAtCommit(root, sha, path, out int len);
-            if (ptr == IntPtr.Zero)
-                return Array.Empty<byte>();
-            try
-            {
-                if (len <= 0)
-                    return Array.Empty<byte>();
-                var buffer = new byte[len];
-                Marshal.Copy(ptr, buffer, 0, len);
-                return buffer;
-            }
-            finally { MsGitFree(ptr); }
+            return TakeBytes(ptr, len);
         }
     }
 }

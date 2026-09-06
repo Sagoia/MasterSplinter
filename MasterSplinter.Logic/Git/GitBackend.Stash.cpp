@@ -9,6 +9,8 @@
 #include "GitBackend.h"
 #include "GitText.h"
 
+#include "../Parse/RefParser.h"
+
 namespace ms
 {
     // ---- Stash, blame, search, reflog (Phase 8) ------------------------------------------------
@@ -45,7 +47,7 @@ namespace ms
     std::string GitBackend::StashList(const std::string& root) const
     {
         if (root.empty())
-            return std::string();
+            return parse::ParseStashList("");
         // `git stash list` is a reflog walk over refs/stash, so it is log-family: %x1f escapes
         // apply (NOT for-each-ref's %1f). %gd is the selector ("stash@{0}"), %gs the reflog
         // subject, which is exactly the stash message git composed or the user supplied.
@@ -53,8 +55,10 @@ namespace ms
         // RunRead (not RunRaw): git writes its diagnostics to the same merged stream as its
         // records, so without the exit-code check a failure would be handed to the record parser
         // as if it were data.
-        return RunRead(root, { "stash", "list",
-                               "--format=%gd%x1f%H%x1f%h%x1f%gs%x1f%aI%x1f%an%x1e" });
+        // -z with %gs LAST: a stash message is whatever the user typed and can contain 0x1F, so
+        // the only free-form field is the one a bounded split leaves everything in.
+        return parse::ParseStashList(RunRead(root, { "stash", "list", "-z",
+                               "--format=%gd%x1f%H%x1f%h%x1f%at%x1f%aI%x1f%an%x1f%gs" }));
     }
 
     std::string GitBackend::StashSave(const std::string& root, const std::string& message,
