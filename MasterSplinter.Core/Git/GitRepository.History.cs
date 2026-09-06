@@ -31,7 +31,6 @@ namespace MasterSplinter.Entrypoint.Git
             PackedBuffer buf = NativeLogic.GitLogGraph(RootPath, order, maxCount);
             List<CommitRow> commits = ReadLog(buf);
             GraphDisplayList = buf.Extra.ToArray();
-            CommitGraph.Assign(commits, buf.Extra);
             return commits;
         }
 
@@ -59,9 +58,9 @@ namespace MasterSplinter.Entrypoint.Git
         /// <summary>
         /// Materialises packed commit records into rows.
         /// <para>
-        /// The graph is NOT assigned here. Lane layout is cross-row by nature — where a commit
-        /// sits depends on its children — so it belongs to the whole list, not to one record.
-        /// See <see cref="CommitGraph"/>.
+        /// The graph is not built here, or anywhere on this side: it is laid out natively in the
+        /// same pass and travels in the buffer's extra section, which
+        /// <see cref="GraphDisplayList"/> hands to the renderer untouched.
         /// </para>
         /// </summary>
         internal static List<CommitRow> ReadLog(PackedBuffer buf)

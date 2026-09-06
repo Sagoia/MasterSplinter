@@ -19,7 +19,6 @@ namespace MasterSplinter.Entrypoint.Models
 
     public sealed class CommitRow
     {
-        public GraphRow Graph { get; set; } = new();
         public string Message { get; set; } = "";   // subject (used by the history row)
         public string Body { get; set; } = "";       // remaining commit message lines
         public ObservableCollection<Badge> Badges { get; } = new();

@@ -178,34 +178,68 @@ public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
     [Fact]
     public void TheCommitGraphIsLaidOutOverRealHistory()
     {
-        // The fixture has a real two-parent merge and a branch, so the lanes must actually
-        // branch. Asserted against real git rather than a hand-built adjacency list, which is
-        // the only way to catch the graph being laid out over the wrong rows.
-        IReadOnlyList<CommitRow> log = Open().Log(order: 1, maxCount: 100);
+        // The fixture has a real two-parent merge and a branch, so the lanes must actually branch.
+        // Asserted against real git rather than a hand-built adjacency list, which is the only way
+        // to catch the graph being laid out over the wrong rows.
+        //
+        // Reads the display list the way the renderer does, byte for byte: there is no C# graph
+        // model any more, so this IS the contract the drawing depends on.
+        GitRepository git = Open();
+        IReadOnlyList<CommitRow> log = git.Log(order: 1, maxCount: 100);
+        byte[] graph = git.GraphDisplayList;
 
         Assert.NotEmpty(log);
-        Assert.All(log, c => Assert.NotNull(c.Graph.Dot));
-        Assert.All(log, c => Assert.True(c.Graph.LaneCount >= 1));
+        Assert.True(graph.Length >= 4, "the display list carries at least its row count");
 
-        // The merge widens the graph: at least one row has to use a second lane.
-        Assert.Contains(log, c => c.Graph.LaneCount > 1);
+        int rowCount = BitConverter.ToInt32(graph, 0);
+        Assert.Equal(log.Count, rowCount);
 
-        // And at least one row draws a diagonal -- a line that changes lane between the top and
-        // the bottom of its row is what a fork or a join looks like.
-        Assert.Contains(log, c => c.Graph.Lines.Exists(l => l.X1 != l.X2));
+        const int rowHeader = 5;    // laneCount, dotLane, colorIndex, flags, segCount
+        const int segment = 5;      // x1, y1, x2, y2, colorIndex
+        const byte flagMerge = 0x01;
 
-        // Every segment stays inside its row's declared width, which is what the renderer bets on.
-        foreach (CommitRow c in log)
+        int at = 4;
+        bool sawMerge = false;
+        bool sawDiagonal = false;
+        int widest = 0;
+
+        for (int row = 0; row < rowCount; row++)
         {
-            Assert.True(c.Graph.Dot!.Lane < c.Graph.LaneCount);
-            foreach (GraphLine l in c.Graph.Lines)
+            Assert.True(at + rowHeader <= graph.Length, $"row {row} header is inside the buffer");
+            int laneCount = graph[at];
+            int dotLane = graph[at + 1];
+            byte flags = graph[at + 3];
+            int segments = graph[at + 4];
+            at += rowHeader;
+
+            Assert.True(laneCount >= 1, $"row {row} has at least one lane");
+            Assert.True(dotLane < laneCount, $"row {row} draws its dot inside its own width");
+            widest = Math.Max(widest, laneCount);
+            if ((flags & flagMerge) != 0)
+                sawMerge = true;
+
+            Assert.True(at + (segments * segment) <= graph.Length, $"row {row} segments fit");
+            for (int s = 0; s < segments; s++, at += segment)
             {
-                Assert.InRange(l.X1, 0, c.Graph.LaneCount - 1);
-                Assert.InRange(l.X2, 0, c.Graph.LaneCount - 1);
-                Assert.InRange(l.Y1, 0.0, 1.0);
-                Assert.InRange(l.Y2, 0.0, 1.0);
+                int x1 = graph[at], y1 = graph[at + 1], x2 = graph[at + 2], y2 = graph[at + 3];
+
+                // What the renderer bets on: nothing is drawn outside the row's declared width,
+                // and Y stays in half-row units.
+                Assert.InRange(x1, 0, laneCount - 1);
+                Assert.InRange(x2, 0, laneCount - 1);
+                Assert.InRange(y1, 0, 2);
+                Assert.InRange(y2, 0, 2);
+                Assert.InRange(graph[at + 4], 0, 5);   // colour index, six-entry palette
+
+                if (x1 != x2)
+                    sawDiagonal = true;
             }
         }
+
+        Assert.Equal(graph.Length, at);
+        Assert.True(sawMerge, "the fixture's two-parent merge should be flagged as one");
+        Assert.True(widest > 1, "the merge should widen the graph past a single lane");
+        Assert.True(sawDiagonal, "a fork or join draws a line that changes lane within its row");
     }
 
     [Fact]
