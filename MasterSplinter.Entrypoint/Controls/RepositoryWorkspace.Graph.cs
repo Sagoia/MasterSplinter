@@ -37,6 +37,7 @@ namespace MasterSplinter.Entrypoint.Controls
 
         private void GraphSurface_Unloaded(object sender, RoutedEventArgs e)
         {
+            Vm.PropertyChanged -= Graph_ViewModelChanged;
             if (_commitScroller != null)
             {
                 _commitScroller.ViewChanged -= CommitScroller_ViewChanged;
@@ -123,6 +124,16 @@ namespace MasterSplinter.Entrypoint.Controls
         private void GraphSurface_CompositionScaleChanged(SwapChainPanel sender, object args)
             => PushGraphViewport();
 
+        private void GraphSurface_ActualThemeChanged(FrameworkElement sender, object args)
+        {
+            // Let XAML finish updating ThemeResource values before reading the surface's brush.
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                PushGraphTheme();
+                _graph?.Render();
+            });
+        }
+
         private void PushGraphModel() => _graph?.SetModel(Vm.GraphDisplayList);
 
         /// <summary>
@@ -131,18 +142,17 @@ namespace MasterSplinter.Entrypoint.Controls
         /// declares literally.
         /// </summary>
         private void PushGraphTheme()
-            => _graph?.SetTheme(ResourceArgb("PanelBackgroundBrush", 0xFF1E1E1E),
-                                ResourceArgb("ListViewItemBackgroundSelected", 0xFF2563EB));
-
-        private uint ResourceArgb(string key, uint fallback)
         {
-            object? found = null;
-            if (CommitsList.Resources.TryGetValue(key, out object? local))
-                found = local;
-            else if (Application.Current.Resources.TryGetValue(key, out object? app))
-                found = app;
+            CommitsList.Resources.TryGetValue("ListViewItemBackgroundSelected", out object? selected);
+            // This ThemeResource belongs to the surface, so it follows its effective theme even
+            // when the window overrides the application's requested theme.
+            _graph?.SetTheme(BrushArgb(GraphSurface.Background, 0xFF1E1E1E),
+                             BrushArgb(selected, 0xFF2563EB));
+        }
 
-            if (found is Microsoft.UI.Xaml.Media.SolidColorBrush brush)
+        private static uint BrushArgb(object? value, uint fallback)
+        {
+            if (value is SolidColorBrush brush)
             {
                 Windows.UI.Color c = brush.Color;
                 return ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;

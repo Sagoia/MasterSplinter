@@ -95,7 +95,7 @@ namespace ms
 
         // Same argv as Log, deliberately: the two must be interchangeable, so the only difference
         // is whether the graph section is computed.
-        return parse::ParseLogRecordsWithGraph(RunRaw(root, std::move(args)));
+        return parse::ParseLogRecordsWithGraph(RunRaw(root, std::move(args)), reverse);
     }
 
     std::string GitBackend::RefDetails(const std::string& root) const

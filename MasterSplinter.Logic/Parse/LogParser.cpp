@@ -169,7 +169,7 @@ namespace ms::parse
         };
     }
 
-    static std::string Parse(std::string_view raw, Topology* topology)
+    static std::string Parse(std::string_view raw, Topology* topology, bool oldestFirst = false)
     {
         PackedWriter w(packed::Kind::Log, kLogRecordSize);
 
@@ -291,7 +291,7 @@ namespace ms::parse
                 }
                 adjacency.push_back(std::move(rows));
             }
-            w.SetExtra(graph::BuildDisplayList(adjacency));
+            w.SetExtra(graph::BuildDisplayList(adjacency, oldestFirst));
         }
 
         return w.Finish();
@@ -299,9 +299,9 @@ namespace ms::parse
 
     std::string ParseLogRecords(std::string_view raw) { return Parse(raw, nullptr); }
 
-    std::string ParseLogRecordsWithGraph(std::string_view raw)
+    std::string ParseLogRecordsWithGraph(std::string_view raw, bool oldestFirst)
     {
         Topology topology;
-        return Parse(raw, &topology);
+        return Parse(raw, &topology, oldestFirst);
     }
 }

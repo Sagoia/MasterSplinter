@@ -78,7 +78,8 @@ namespace ms::parse
     // records are being built. Running it as a separate pass would mean either a second walk of
     // the log -- which could disagree with the first if a ref moved in between -- or handing the
     // host a job it would have to hand straight back.
-    std::string ParseLogRecordsWithGraph(std::string_view raw);
+    // oldestFirst must match git's --reverse; records remain in the order git returned them.
+    std::string ParseLogRecordsWithGraph(std::string_view raw, bool oldestFirst = false);
 
     // Splits git's raw message (%B) into the subject and body the host displays, reproducing what
     // %s and %b used to emit: the subject is the first paragraph with its newlines folded to

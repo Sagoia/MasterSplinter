@@ -89,6 +89,63 @@ namespace
 
 // ---- The shapes the layout has to get right ------------------------------------------------------
 
+TEST(GraphLayout, OldestFirstConnectsAStraightLineUpward)
+{
+    const std::vector<Row> rows = Decode(gl::BuildDisplayList({ {}, { 0 }, { 1 } }, true));
+    ASSERT_EQ(rows.size(), 3u);
+    for (const Row& row : rows)
+    {
+        EXPECT_EQ(row.dotLane, 0);
+        EXPECT_EQ(row.laneCount, 1);
+        EXPECT_EQ(row.color, rows[0].color);
+    }
+    EXPECT_TRUE(rows[0].flags & gl::kFlagRoot);
+    EXPECT_TRUE(rows[0].HasSegment(0, 2, 0, 1));
+    EXPECT_TRUE(rows[1].HasSegment(0, 2, 0, 1));
+    EXPECT_TRUE(rows[1].HasSegment(0, 1, 0, 0));
+    EXPECT_TRUE(rows[2].HasSegment(0, 1, 0, 0));
+    EXPECT_EQ(rows[2].segments.size(), 1u) << "nothing continues past the newest tip";
+}
+
+TEST(GraphLayout, OldestFirstPreservesMergeLanesAndMovesTheBoundaryToTheTop)
+{
+    const std::vector<Row> forward = Layout({ { 1, 2 }, { 3 }, { 3 }, { kOut } });
+    const std::vector<Row> reverse = Decode(
+        gl::BuildDisplayList({ { kOut }, { 0 }, { 0 }, { 2, 1 } }, true));
+    ASSERT_EQ(reverse.size(), forward.size());
+    for (std::size_t i = 0; i < reverse.size(); ++i)
+    {
+        const Row& expected = forward[forward.size() - 1 - i];
+        const Row& actual = reverse[i];
+        EXPECT_EQ(actual.laneCount, expected.laneCount);
+        EXPECT_EQ(actual.dotLane, expected.dotLane);
+        EXPECT_EQ(actual.color, expected.color);
+        EXPECT_EQ(actual.flags, expected.flags);
+        ASSERT_EQ(actual.segments.size(), expected.segments.size());
+        for (std::size_t s = 0; s < actual.segments.size(); ++s)
+        {
+            Seg mirrored = expected.segments[s];
+            mirrored.y1 = gl::kBottom - mirrored.y1;
+            mirrored.y2 = gl::kBottom - mirrored.y2;
+            EXPECT_TRUE(actual.segments[s] == mirrored) << "row " << i << ", segment " << s;
+        }
+    }
+    EXPECT_TRUE(reverse.front().flags & gl::kFlagBoundary);
+    EXPECT_TRUE(reverse.front().HasSegment(0, 1, 0, 0));
+    EXPECT_TRUE(reverse.back().flags & gl::kFlagMerge);
+    EXPECT_TRUE(reverse.back().HasSegment(0, 1, 1, 0));
+}
+
+TEST(GraphLayout, OldestFirstHandlesAnEmptyLogAndASingleRoot)
+{
+    EXPECT_EQ(gl::BuildDisplayList({}, true).size(), 4u);
+    EXPECT_TRUE(Decode(gl::BuildDisplayList({}, true)).empty());
+    const std::vector<Row> rows = Decode(gl::BuildDisplayList({ {} }, true));
+    ASSERT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].flags, gl::kFlagRoot);
+    EXPECT_TRUE(rows[0].segments.empty());
+}
+
 TEST(GraphLayout, AStraightLineIsOneLane)
 {
     // 0 -> 1 -> 2, then a root.

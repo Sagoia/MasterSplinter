@@ -242,6 +242,53 @@ public class EndToEndSmokeTests : IClassFixture<ScratchRepo>
         Assert.True(sawDiagonal, "a fork or join draws a line that changes lane within its row");
     }
 
+    [Theory]
+    [InlineData(100)]
+    [InlineData(3)]
+    public void ReverseDateOrderMirrorsTheGraphAlongWithTheCommits(int maxCount)
+    {
+        // Exercise the order flag through git, the native parser and P/Invoke, including a
+        // truncated window: reversing must keep the same commits and the same lane connections.
+        static List<byte[]> ReadRows(byte[] graph)
+        {
+            Assert.True(graph.Length >= 4);
+            int count = BitConverter.ToInt32(graph, 0);
+            var rows = new List<byte[]>();
+            int at = 4;
+            for (int i = 0; i < count; i++)
+            {
+                Assert.True(at + 5 <= graph.Length);
+                int length = 5 + graph[at + 4] * 5;
+                Assert.True(at + length <= graph.Length);
+                rows.Add(graph[at..(at + length)]);
+                at += length;
+            }
+            Assert.Equal(graph.Length, at);
+            return rows;
+        }
+
+        GitRepository git = Open();
+        IReadOnlyList<CommitRow> forward = git.Log(order: 0, maxCount: maxCount);
+        List<byte[]> forwardRows = ReadRows(git.GraphDisplayList);
+        IReadOnlyList<CommitRow> reverse = git.Log(order: 2, maxCount: maxCount);
+        List<byte[]> reverseRows = ReadRows(git.GraphDisplayList);
+
+        Assert.NotEmpty(forward);
+        Assert.Equal(forward.Select(c => c.FullHash).Reverse(), reverse.Select(c => c.FullHash));
+        Assert.Equal(forward.Count, forwardRows.Count);
+        Assert.Equal(reverse.Count, reverseRows.Count);
+        for (int i = 0; i < reverseRows.Count; i++)
+        {
+            byte[] expected = forwardRows[forwardRows.Count - 1 - i];
+            for (int at = 5; at < expected.Length; at += 5)
+            {
+                expected[at + 1] = (byte)(2 - expected[at + 1]);
+                expected[at + 3] = (byte)(2 - expected[at + 3]);
+            }
+            Assert.Equal(expected, reverseRows[i]);
+        }
+    }
+
     [Fact]
     public void RefsIncludeTheBranchesAndTheTag()
     {

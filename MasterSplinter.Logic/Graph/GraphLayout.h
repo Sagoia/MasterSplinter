@@ -5,7 +5,7 @@
 // Pure logic. No git, no process runner, no OS, no strings -- which is what makes it directly
 // gtest-able and what will let a macOS renderer consume the identical bytes.
 //
-// The model is the standard incremental active-lane walk: go down the rows in display order,
+// The model is the standard incremental active-lane walk: visit rows from children to parents,
 // find or allocate the lane each commit sits on, route its parents (continue / fork / join), and
 // release lanes as branches end. It needs nothing but "which rows are this row's parents", which
 // is why the input is plain integers.
@@ -56,5 +56,8 @@ namespace ms::graph
     // for a parent outside the loaded window. -1 is ordinary, not an error: the log is capped, so
     // an edge routinely leaves the window -- which is exactly what CommitIndex.PositionOfHash
     // returns for a miss, and what the host's tests already pin.
-    std::string BuildDisplayList(const std::vector<std::vector<std::int32_t>>& adjacency);
+    // oldestFirst keeps adjacency in display order, but walks it backwards so children still
+    // claim lanes before their parents. Output rows and segment Y coordinates follow the display.
+    std::string BuildDisplayList(const std::vector<std::vector<std::int32_t>>& adjacency,
+                                 bool oldestFirst = false);
 }

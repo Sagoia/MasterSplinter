@@ -147,7 +147,8 @@ namespace ms::graph
         };
     }
 
-    std::string BuildDisplayList(const std::vector<std::vector<std::int32_t>>& adjacency)
+    std::string BuildDisplayList(const std::vector<std::vector<std::int32_t>>& adjacency,
+                                 bool oldestFirst)
     {
         std::string out;
         AppendU32(out, static_cast<std::uint32_t>(adjacency.size()));
@@ -155,9 +156,16 @@ namespace ms::graph
         Lanes lanes;
         std::vector<std::size_t> joins;
         std::vector<Segment> segments;
+        std::vector<std::size_t> rowOffsets;
+        if (oldestFirst)
+            rowOffsets.reserve(adjacency.size());
 
-        for (std::size_t row = 0; row < adjacency.size(); ++row)
+        for (std::size_t step = 0; step < adjacency.size(); ++step)
         {
+            // Lane state always advances from children to parents, regardless of display order.
+            const std::size_t row = oldestFirst ? adjacency.size() - 1 - step : step;
+            if (oldestFirst)
+                rowOffsets.push_back(out.size());
             const std::int32_t here = static_cast<std::int32_t>(row);
             segments.clear();
 
@@ -254,13 +262,28 @@ namespace ms::graph
             {
                 const Segment& s = segments[i];
                 out.push_back(static_cast<char>(s.x1));
-                out.push_back(static_cast<char>(s.y1));
+                out.push_back(static_cast<char>(oldestFirst ? kBottom - s.y1 : s.y1));
                 out.push_back(static_cast<char>(s.x2));
-                out.push_back(static_cast<char>(s.y2));
+                out.push_back(static_cast<char>(oldestFirst ? kBottom - s.y2 : s.y2));
                 out.push_back(static_cast<char>(s.color));
             }
         }
 
+        if (oldestFirst)
+        {
+            // Rows have variable lengths, so reverse whole row spans, keeping their headers and
+            // segments together. Their coordinates were already mirrored during emission.
+            std::string reversed;
+            reversed.reserve(out.size());
+            AppendU32(reversed, static_cast<std::uint32_t>(adjacency.size()));
+            std::size_t end = out.size();
+            for (auto it = rowOffsets.rbegin(); it != rowOffsets.rend(); ++it)
+            {
+                reversed.append(out, *it, end - *it);
+                end = *it;
+            }
+            return reversed;
+        }
         return out;
     }
 }

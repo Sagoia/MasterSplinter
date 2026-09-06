@@ -688,16 +688,18 @@
                     <!-- Direct2D commit graph. Overlays the fixed 150px Graph column and is fed
                          the history list's scroll offset, so ONE surface draws every row instead
                          of a Canvas per realized row. IsHitTestVisible=False so selection, hover
-                         and the context menu still reach the rows underneath; the swap chain uses
-                         premultiplied alpha and clears transparent, so the selection highlight
-                         shows through between the lanes. Declared after the ListView so it
+                         and the context menu still reach the rows underneath. The renderer paints
+                         the theme background and selected rows itself; the host keeps those colors
+                         and the selection in sync. Declared after the ListView so it
                          composites on top of it. -->
                     <SwapChainPanel x:Name="GraphSurface" Grid.Row="2"
+                                    Background="{ThemeResource PanelBackgroundBrush}"
                                     Width="150" HorizontalAlignment="Left" VerticalAlignment="Stretch"
                                     IsHitTestVisible="False"
                                     Visibility="{Binding IsReflogMode, Converter={StaticResource InvBoolToVis}}"
                                     Loaded="GraphSurface_Loaded"
                                     Unloaded="GraphSurface_Unloaded"
+                                    ActualThemeChanged="GraphSurface_ActualThemeChanged"
                                     SizeChanged="GraphSurface_SizeChanged"
                                     CompositionScaleChanged="GraphSurface_CompositionScaleChanged" />
                 </Grid>
