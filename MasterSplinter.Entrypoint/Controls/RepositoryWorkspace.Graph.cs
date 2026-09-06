@@ -144,9 +144,12 @@ namespace MasterSplinter.Entrypoint.Controls
         private void PushGraphTheme()
         {
             CommitsList.Resources.TryGetValue("ListViewItemBackgroundSelected", out object? selected);
-            // This ThemeResource belongs to the surface, so it follows its effective theme even
-            // when the window overrides the application's requested theme.
-            _graph?.SetTheme(BrushArgb(GraphSurface.Background, 0xFF1E1E1E),
+            // Read off HistoryPane, not the surface: a SwapChainPanel cannot carry a Background at
+            // all (WinUI throws at parse time). HistoryPane is the surface's own container, so its
+            // resolved brush follows the same effective theme -- including when the window
+            // overrides the application's requested theme, which a resource-dictionary lookup
+            // would miss.
+            _graph?.SetTheme(BrushArgb(HistoryPane.Background, 0xFF1E1E1E),
                              BrushArgb(selected, 0xFF2563EB));
         }
 

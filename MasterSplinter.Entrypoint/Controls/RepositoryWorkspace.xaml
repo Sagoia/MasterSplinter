@@ -521,8 +521,10 @@
                     </Grid>
                 </Border>
 
-                <!-- Commit history (header + table) -->
-                <Grid Grid.Row="1" Background="{ThemeResource PanelBackgroundBrush}">
+                <!-- Commit history (header + table). Named because the graph surface reads its
+                     resolved Background: SwapChainPanel cannot carry one itself (see below),
+                     and this is the same subtree, so it follows the same effective theme. -->
+                <Grid x:Name="HistoryPane" Grid.Row="1" Background="{ThemeResource PanelBackgroundBrush}">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
@@ -691,15 +693,19 @@
                          and the context menu still reach the rows underneath. The renderer paints
                          the theme background and selected rows itself; the host keeps those colors
                          and the selection in sync. Declared after the ListView so it
-                         composites on top of it. -->
+                         composites on top of it.
+
+                         NOTE: a SwapChainPanel cannot have a Background - WinUI throws
+                         "Setting Background property is not supported on SwapChainPanel" at
+                         PARSE time, which kills the app before its window appears. The
+                         renderer reads HistoryPane.Background instead. -->
                     <SwapChainPanel x:Name="GraphSurface" Grid.Row="2"
-                                    Background="{ThemeResource PanelBackgroundBrush}"
+                                    ActualThemeChanged="GraphSurface_ActualThemeChanged"
                                     Width="150" HorizontalAlignment="Left" VerticalAlignment="Stretch"
                                     IsHitTestVisible="False"
                                     Visibility="{Binding IsReflogMode, Converter={StaticResource InvBoolToVis}}"
                                     Loaded="GraphSurface_Loaded"
                                     Unloaded="GraphSurface_Unloaded"
-                                    ActualThemeChanged="GraphSurface_ActualThemeChanged"
                                     SizeChanged="GraphSurface_SizeChanged"
                                     CompositionScaleChanged="GraphSurface_CompositionScaleChanged" />
                 </Grid>
