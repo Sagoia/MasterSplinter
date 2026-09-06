@@ -10,5 +10,6 @@ namespace ms
     {
     public:
         std::unique_ptr<IProcessRunner> CreateProcessRunner() const override;
+        std::unique_ptr<render::IGraphRenderer> CreateGraphRenderer() const override;
     };
 }

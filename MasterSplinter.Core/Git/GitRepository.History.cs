@@ -13,12 +13,24 @@ namespace MasterSplinter.Entrypoint.Git
     {
         // ---- Commit history --------------------------------------------------------------------
 
+        /// <summary>
+        /// The commit-graph display list for the most recent <see cref="Log"/> call, as the
+        /// renderer consumes it. Empty until the first load.
+        /// <para>
+        /// Kept on the repository rather than threaded through the view model because the two have
+        /// the same lifetime: a refresh replaces this instance wholesale, so the graph and the rows
+        /// it describes cannot fall out of step.
+        /// </para>
+        /// </summary>
+        public byte[] GraphDisplayList { get; private set; } = Array.Empty<byte>();
+
         public IReadOnlyList<CommitRow> Log(int order, int maxCount)
         {
             // The graph rides in the same buffer as the records, laid out natively while their
             // parents were still resolvable to row positions.
             PackedBuffer buf = NativeLogic.GitLogGraph(RootPath, order, maxCount);
             List<CommitRow> commits = ReadLog(buf);
+            GraphDisplayList = buf.Extra.ToArray();
             CommitGraph.Assign(commits, buf.Extra);
             return commits;
         }

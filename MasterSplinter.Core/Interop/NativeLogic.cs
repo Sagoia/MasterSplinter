@@ -320,6 +320,51 @@ namespace MasterSplinter.Entrypoint.Interop
         [DllImport(Dll, EntryPoint = "MsGitFree", CallingConvention = CallingConvention.Cdecl)]
         private static extern void MsGitFree(IntPtr ptr);
 
+        // ---- Commit graph rendering (Phase F) -----------------------------------------------
+        // Handle-based, unlike every other export: a renderer owns a GPU device that has to live
+        // across calls. The handle is opaque here and is released by GraphDestroy.
+
+        [DllImport(Dll, EntryPoint = "MsGraphCreate", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr MsGraphCreate(IntPtr panelUnknown);
+
+        [DllImport(Dll, EntryPoint = "MsGraphSetModel", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphSetModel(IntPtr handle, byte[]? displayList, int length);
+
+        [DllImport(Dll, EntryPoint = "MsGraphSetViewport", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphSetViewport(IntPtr handle, float widthDip, float heightDip,
+                                                      double scrollPx, float rowHeightPx, float scale);
+
+        [DllImport(Dll, EntryPoint = "MsGraphSetTheme", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphSetTheme(IntPtr handle, uint backgroundArgb, uint selectedArgb);
+
+        [DllImport(Dll, EntryPoint = "MsGraphSetSelection", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphSetSelection(IntPtr handle, int[]? rows, int count);
+
+        [DllImport(Dll, EntryPoint = "MsGraphRender", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphRender(IntPtr handle);
+
+        [DllImport(Dll, EntryPoint = "MsGraphDestroy", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void MsGraphDestroy(IntPtr handle);
+
+        internal static IntPtr GraphCreate(IntPtr panelUnknown) => MsGraphCreate(panelUnknown);
+
+        internal static void GraphSetModel(IntPtr handle, byte[]? displayList)
+            => MsGraphSetModel(handle, displayList, displayList?.Length ?? 0);
+
+        internal static void GraphSetViewport(IntPtr handle, float widthDip, float heightDip,
+                                              double scrollPx, float rowHeightPx, float scale)
+            => MsGraphSetViewport(handle, widthDip, heightDip, scrollPx, rowHeightPx, scale);
+
+        internal static void GraphSetTheme(IntPtr handle, uint backgroundArgb, uint selectedArgb)
+            => MsGraphSetTheme(handle, backgroundArgb, selectedArgb);
+
+        internal static void GraphSetSelection(IntPtr handle, int[]? rows)
+            => MsGraphSetSelection(handle, rows, rows?.Length ?? 0);
+
+        internal static void GraphRender(IntPtr handle) => MsGraphRender(handle);
+
+        internal static void GraphDestroy(IntPtr handle) => MsGraphDestroy(handle);
+
         /// <summary>Copies a UTF-8 string returned by the native git backend, then frees it.</summary>
         private static string TakeString(IntPtr ptr)
         {

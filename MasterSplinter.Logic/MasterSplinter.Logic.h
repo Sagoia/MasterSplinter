@@ -391,6 +391,42 @@ extern "C" {
 	MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const char* ref, int maxCount,
 	                                          int* outLen);
 
+	// ---- Commit graph rendering (Phase F) --------------------------------------------------------
+	//
+	// A HANDLE-BASED convention, and the only one in this ABI: everything else is stateless and
+	// takes a repository root. A renderer owns a GPU device and a swap chain, which have to live
+	// across calls, so the host holds an opaque handle instead.
+	//
+	// MsGraphCreate takes the SwapChainPanel's IUnknown*; the native side QIs ISwapChainPanelNative
+	// and does every piece of COM and D3D work itself. Returns nullptr when no device could be
+	// created, and the host then simply shows no graph.
+	//
+	// Nothing here throws, and every call tolerates a null handle, so a failed create degrades to a
+	// blank graph column rather than to a crash.
+	MASTERSPLINTERLOGIC_API void* MsGraphCreate(void* panelUnknown);
+
+	// The display list from MsGitLogGraph's extra section. Copied, so the caller may free its own.
+	MASTERSPLINTERLOGIC_API void MsGraphSetModel(void* handle, const void* displayList, int length);
+
+	// widthDip/heightDip are device-independent pixels; scrollPx is the history list's vertical
+	// offset; rowHeightPx is fixed by the host (26) and is what makes offset -> row exact; scale is
+	// the panel's composition scale.
+	MASTERSPLINTERLOGIC_API void MsGraphSetViewport(void* handle, float widthDip, float heightDip,
+	                                                double scrollPx, float rowHeightPx, float scale);
+
+	// The list colours the renderer paints rows with, as 0xAARRGGBB. It paints them at all
+	// because a WinUI 3 SwapChainPanel does NOT blend with the XAML behind it -- measured, not
+	// assumed: a fully transparent clear leaves black rather than the rows underneath.
+	MASTERSPLINTERLOGIC_API void MsGraphSetTheme(void* handle, unsigned int backgroundArgb,
+	                                             unsigned int selectedArgb);
+
+	// Which rows are selected, by index; the history list allows extended selection. Pass a null
+	// array or a zero count to clear.
+	MASTERSPLINTERLOGIC_API void MsGraphSetSelection(void* handle, const int* rows, int count);
+
+	MASTERSPLINTERLOGIC_API void MsGraphRender(void* handle);
+	MASTERSPLINTERLOGIC_API void MsGraphDestroy(void* handle);
+
 	// Frees any char* returned by the MsGit* functions above.
 	MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr);
 }

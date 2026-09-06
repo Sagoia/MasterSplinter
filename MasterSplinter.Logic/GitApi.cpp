@@ -12,6 +12,7 @@
 #include "Git/GitBackend.h"
 #include "Packed/PackedWriter.h"
 #include "Platform/IPlatformFactory.h"
+#include "Render/IGraphRenderer.h"
 
 #include <atomic>
 #include <cstddef>
@@ -551,6 +552,102 @@ extern "C" MASTERSPLINTERLOGIC_API char* MsGitReflog(const char* root, const cha
                       root, refName, maxCount);
 }
 
+
+// ---- Commit graph rendering (Phase F) --------------------------------------------------------
+//
+// Handle-based, unlike everything else here, because a renderer owns a GPU device that has to
+// live across calls. The handle is an IGraphRenderer*; the host treats it as opaque.
+//
+// These do not use CallRead/CallWrite: those return char* and apply a string convention. What
+// they share is the rule those exist for -- nothing throws across the boundary.
+
+extern "C" MASTERSPLINTERLOGIC_API void* MsGraphCreate(void* panelUnknown)
+{
+    try
+    {
+        std::unique_ptr<ms::IPlatformFactory> factory = ms::CreatePlatformFactory();
+        std::unique_ptr<ms::render::IGraphRenderer> renderer = factory->CreateGraphRenderer();
+        if (!renderer || !renderer->Attach(panelUnknown))
+            return nullptr;
+        return renderer.release();
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphSetModel(void* handle, const void* displayList, int length)
+{
+    try
+    {
+        if (handle)
+            static_cast<ms::render::IGraphRenderer*>(handle)->SetModel(displayList, length);
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphSetViewport(void* handle, float widthDip, float heightDip,
+                                                           double scrollPx, float rowHeightPx, float scale)
+{
+    try
+    {
+        if (!handle)
+            return;
+        ms::render::Viewport viewport;
+        viewport.width = widthDip;
+        viewport.height = heightDip;
+        viewport.scrollPx = scrollPx;
+        viewport.rowHeight = rowHeightPx;
+        viewport.scale = scale > 0.0f ? scale : 1.0f;
+        static_cast<ms::render::IGraphRenderer*>(handle)->SetViewport(viewport);
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphSetTheme(void* handle, unsigned int backgroundArgb,
+                                                        unsigned int selectedArgb)
+{
+    try
+    {
+        if (!handle)
+            return;
+        ms::render::Chrome chrome;
+        chrome.background = backgroundArgb;
+        chrome.selected = selectedArgb;
+        static_cast<ms::render::IGraphRenderer*>(handle)->SetChrome(chrome);
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphSetSelection(void* handle, const int* rows, int count)
+{
+    try
+    {
+        if (handle)
+            static_cast<ms::render::IGraphRenderer*>(handle)->SetSelection(rows, count < 0 ? 0 : count);
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphRender(void* handle)
+{
+    try
+    {
+        if (handle)
+            static_cast<ms::render::IGraphRenderer*>(handle)->Render();
+    }
+    catch (...) {}
+}
+
+extern "C" MASTERSPLINTERLOGIC_API void MsGraphDestroy(void* handle)
+{
+    try
+    {
+        delete static_cast<ms::render::IGraphRenderer*>(handle);
+    }
+    catch (...) {}
+}
 
 extern "C" MASTERSPLINTERLOGIC_API void MsGitFree(char* ptr)
 {

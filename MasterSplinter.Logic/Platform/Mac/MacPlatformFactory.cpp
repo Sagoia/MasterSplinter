@@ -14,6 +14,13 @@ namespace ms
     {
         return std::make_unique<MacProcessRunner>();
     }
+
+    std::unique_ptr<render::IGraphRenderer> MacPlatformFactory::CreateGraphRenderer() const
+    {
+        // The display list is platform-neutral, so this is a CoreGraphics view away -- but an
+        // honest nullptr beats a stub that silently draws nothing while claiming to work.
+        return nullptr;
+    }
 }
 
 #endif // defined(__APPLE__)

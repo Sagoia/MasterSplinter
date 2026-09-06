@@ -98,6 +98,11 @@ namespace MasterSplinter.Entrypoint.Controls
         {
             if (e.AddedItems.Count > 0 && e.AddedItems[^1] is CommitRow row)
                 Vm.SelectedCommit = row;
+
+            // The graph surface paints its own row backgrounds, so it needs to know what is
+            // selected or the highlight stops at the Description column. See Chrome in
+            // Render/IGraphRenderer.h for why it paints them at all.
+            PushGraphSelection();
         }
 
         /// <summary>The commits the user has selected, in list order (top row first).</summary>

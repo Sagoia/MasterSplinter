@@ -31,6 +31,24 @@ namespace MasterSplinter.Entrypoint.ViewModels
         /// <summary>The filtered commit list bound to the history table. Bulk-capable because a
         /// filter keystroke replaces up to <see cref="MaxCommits"/> rows at once.</summary>
         public BulkObservableCollection<CommitRow> Commits { get; } = new();
+
+        /// <summary>
+        /// The commit-graph display list for whatever <see cref="Commits"/> is currently showing,
+        /// as the native renderer consumes it. Empty for search results, which deliberately have
+        /// no graph.
+        /// <para>
+        /// Raised as a property change so the view can hand it to the renderer without having to
+        /// know when a load finished.
+        /// </para>
+        /// </summary>
+        public byte[] GraphDisplayList { get; private set; } = Array.Empty<byte>();
+
+        /// <summary>Publishes the graph for the rows just loaded; empty clears it.</summary>
+        private void SetGraphDisplayList(byte[] graph)
+        {
+            GraphDisplayList = graph;
+            OnPropertyChanged(nameof(GraphDisplayList));
+        }
         public BulkObservableCollection<SidebarItemVM> Sidebar { get; } = new();
         public ObservableCollection<RecentRepository> Recent { get; } = new();
 
